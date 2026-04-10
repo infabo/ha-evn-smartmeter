@@ -129,7 +129,7 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             today_data = await self.api.get_consumption_per_day(today)
             if today_data:
                 self._current_day_total = sum(
-                    v for _, v in today_data if v is not None
+                    v for v in today_data if v is not None
                 )
             else:
                 self._current_day_total = 0.0
@@ -164,7 +164,7 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 day_data = await self.api.get_consumption_per_day(current)
                 if day_data:
-                    day_total = sum(v for _, v in day_data if v is not None)
+                    day_total = sum(v for v in day_data if v is not None)
                     self._completed_days_total += day_total
                     _LOGGER.debug(
                         "Processed day %s: %.3f kWh", current.isoformat(), day_total

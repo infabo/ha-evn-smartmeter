@@ -136,14 +136,15 @@ class Smartmeter:
 
     async def get_consumption_per_day(
         self, day: date
-    ) -> list[tuple[str, float | None]]:
+    ) -> list[float | None]:
         """Load consumption for one day (15-min intervals).
 
         Args:
             day: date object for the day to fetch.
 
         Returns:
-            List of (timestamp, consumption_kwh) tuples.
+            List of consumption values (kWh) for each 15-min interval.
+            Values may be None if not yet available.
         """
         # Portal uses non-padded format: YYYY-M-D
         day_str = f"{day.year}-{day.month}-{day.day}"
@@ -156,19 +157,25 @@ class Smartmeter:
                 params={"meterId": self._metering_point_id, "day": day_str},
             )
             raw = response.json()
-            _LOGGER.debug("Raw day response type=%s, len=%s", type(raw).__name__, len(raw) if isinstance(raw, list) else "n/a")
             if not raw:
                 return []
             entry = raw[0] if isinstance(raw, list) else raw
-            # API may wrap data in ConsumptionData
             data = entry.get("ConsumptionData", entry) if isinstance(entry, dict) else entry
-            _LOGGER.debug("Day data keys: %s", list(data.keys()) if isinstance(data, dict) else "not a dict")
-            times = data.get("peakDemandTimes", [])
+            # meteredValues is an indexed array of 15-min interval consumption values
             metered = data.get("meteredValues", [])
-            if not times:
-                _LOGGER.debug("No peakDemandTimes for %s", day_str)
-                return []
-            return list(zip(times, metered))
+            estimated = data.get("estimatedValues", [])
+            # Merge: use metered where available, fall back to estimated
+            values = [
+                m if m is not None else estimated[i] if i < len(estimated) else None
+                for i, m in enumerate(metered)
+            ]
+            non_null = [v for v in values if v is not None]
+            _LOGGER.debug(
+                "Day %s: %d values, %d non-null, sum=%.3f",
+                day_str, len(values), len(non_null),
+                sum(non_null) if non_null else 0.0,
+            )
+            return values
         except (httpx.RequestError, ValueError, KeyError, IndexError) as err:
             _LOGGER.warning("Error fetching day consumption for %s: %s", day_str, err)
             return []
