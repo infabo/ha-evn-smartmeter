@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -17,8 +15,8 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from pynoesmartmeter import Smartmeter
-from pynoesmartmeter.errors import SmartmeterLoginError, SmartmeterConnectionError
+from .smartmeter import Smartmeter
+from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
 from .const import DOMAIN, DEFAULT_SCAN_INTERVAL_MINUTES
 
@@ -44,9 +42,6 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         password = entry.data[CONF_PASSWORD]
 
         self.api = Smartmeter(username, password)
-        self.api.SESSION_FILE = os.path.join(
-            tempfile.gettempdir(), f"evn_smartmeter_{entry.entry_id}.pkl"
-        )
 
         # Accumulated total of all fully completed days
         self._completed_days_total: float = 0.0
@@ -100,8 +95,7 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_shutdown(self) -> None:
         """Clean up resources."""
         await super().async_shutdown()
-        if self.api._session is not None:
-            await self.api._session.aclose()
+        await self.api.close()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from EVN Smart Meter API."""

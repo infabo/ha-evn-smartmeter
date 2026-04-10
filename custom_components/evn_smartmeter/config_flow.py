@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import tempfile
-import os
 from typing import Any
 
 import voluptuous as vol
@@ -12,8 +10,8 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
-from pynoesmartmeter import Smartmeter
-from pynoesmartmeter.errors import SmartmeterLoginError, SmartmeterConnectionError
+from .smartmeter import Smartmeter
+from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
 from .const import DOMAIN
 
@@ -66,9 +64,6 @@ class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> str | None:
         """Validate credentials. Returns error key or None on success."""
         api = Smartmeter(username, password)
-        api.SESSION_FILE = os.path.join(
-            tempfile.gettempdir(), "evn_smartmeter_configflow.pkl"
-        )
 
         try:
             await api.authenticate()
@@ -80,10 +75,6 @@ class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.exception("Unexpected exception during authentication")
             return "unknown"
         finally:
-            if api._session is not None:
-                await api._session.aclose()
-            # Clean up temp session file
-            if os.path.exists(api.SESSION_FILE):
-                os.remove(api.SESSION_FILE)
+            await api.close()
 
         return None
