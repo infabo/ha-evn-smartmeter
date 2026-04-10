@@ -12,6 +12,7 @@ Changes from upstream:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -55,7 +56,9 @@ class Smartmeter:
             self._session = None
 
         _LOGGER.debug("Starting new session and authenticating")
-        session = httpx.AsyncClient(timeout=30.0)
+        # Create client in executor to avoid blocking the event loop
+        # (httpx loads SSL certificates in the constructor)
+        session = await asyncio.to_thread(httpx.AsyncClient, timeout=30.0)
         auth_data = {"user": self._username, "pwd": self._password}
 
         try:
