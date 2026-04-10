@@ -125,6 +125,7 @@ class Smartmeter:
         meters = response.json()
         if not meters:
             raise SmartmeterConnectionError("No metering points found for this account")
+        _LOGGER.debug("Metering points response: %s", meters)
         self._metering_point_id = meters[0]["meteringPointId"]
         _LOGGER.debug(
             "Found %d metering point(s), using %s",
@@ -154,8 +155,20 @@ class Smartmeter:
                 self.API_CONSUMPTION_URL + "/Day",
                 params={"meterId": self._metering_point_id, "day": day_str},
             )
-            data = response.json()[0]
-            return list(zip(data["peakDemandTimes"], data["meteredValues"]))
+            raw = response.json()
+            _LOGGER.debug("Raw day response type=%s, len=%s", type(raw).__name__, len(raw) if isinstance(raw, list) else "n/a")
+            if not raw:
+                return []
+            entry = raw[0] if isinstance(raw, list) else raw
+            # API may wrap data in ConsumptionData
+            data = entry.get("ConsumptionData", entry) if isinstance(entry, dict) else entry
+            _LOGGER.debug("Day data keys: %s", list(data.keys()) if isinstance(data, dict) else "not a dict")
+            times = data.get("peakDemandTimes", [])
+            metered = data.get("meteredValues", [])
+            if not times:
+                _LOGGER.debug("No peakDemandTimes for %s", day_str)
+                return []
+            return list(zip(times, metered))
         except (httpx.RequestError, ValueError, KeyError, IndexError) as err:
             _LOGGER.warning("Error fetching day consumption for %s: %s", day_str, err)
             return []
