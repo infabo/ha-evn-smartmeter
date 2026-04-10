@@ -52,6 +52,8 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Meter metadata
         self._meter_id: str | None = None
         self._metering_point_id: str | None = None
+        # One-time diagnostic flag
+        self._diag_done: bool = False
 
     @property
     def total_consumption(self) -> float:
@@ -117,6 +119,22 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._meter_id = meter.get("meteringPointId")
             except Exception as err:
                 raise UpdateFailed(f"Error fetching meter details: {err}") from err
+
+        # One-time diagnostic: probe several days to find available data
+        if not self._diag_done:
+            self._diag_done = True
+            _LOGGER.debug("Running diagnostic: probing last 7 days for data")
+            for offset in range(0, 7):
+                probe_day = date.today() - timedelta(days=offset)
+                probe_data = await self.api.get_consumption_per_day(probe_day)
+                non_null = [v for v in probe_data if v is not None] if probe_data else []
+                _LOGGER.debug(
+                    "Probe %s: %d total values, %d non-null, sum=%.3f",
+                    probe_day.isoformat(),
+                    len(probe_data),
+                    len(non_null),
+                    sum(non_null) if non_null else 0.0,
+                )
 
         yesterday = date.today() - timedelta(days=1)
 

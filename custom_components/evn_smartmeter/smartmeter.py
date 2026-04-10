@@ -164,6 +164,13 @@ class Smartmeter:
             # meteredValues is an indexed array of 15-min interval consumption values
             metered = data.get("meteredValues", [])
             estimated = data.get("estimatedValues", [])
+            _LOGGER.debug(
+                "Day %s raw entry keys=%s meteredValues=%s estimatedValues=%s",
+                day_str,
+                list(data.keys()) if isinstance(data, dict) else "?",
+                metered[:5] if metered else metered,
+                estimated[:5] if estimated else estimated,
+            )
             # Merge: use metered where available, fall back to estimated
             values = [
                 m if m is not None else estimated[i] if i < len(estimated) else None
