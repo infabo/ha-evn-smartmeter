@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EVN Smart Meter Anmeldung",
+        "description": "Gib deine Zugangsdaten für smartmeter.netz-noe.at ein",
+        "data": {
+          "username": "Benutzername",
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Benutzername oder Passwort ungültig",
+      "cannot_connect": "Verbindung zu smartmeter.netz-noe.at nicht möglich",
+      "unknown": "Unerwarteter Fehler"
+    },
+    "abort": {
+      "already_configured": "Dieses Konto ist bereits konfiguriert"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "total_consumption": {
+        "name": "Gesamtverbrauch"
+      },
+      "daily_consumption": {
+        "name": "Tagesverbrauch"
+      }
+    }
+  }
+}
