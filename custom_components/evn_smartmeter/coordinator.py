@@ -111,9 +111,10 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Load meter info on first run
         if self._metering_point_id is None:
             try:
-                meter = await self.api.get_meter_details()
+                meters = await self.api.get_meter_details()
+                meter = meters[0]
                 self._metering_point_id = meter.get("meteringPointId")
-                self._meter_id = meter.get("meterId")
+                self._meter_id = meter.get("meteringPointId")
             except Exception as err:
                 raise UpdateFailed(f"Error fetching meter details: {err}") from err
 
@@ -123,9 +124,9 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._process_completed_days(yesterday)
 
         # Fetch today's running total (15-min intervals available so far)
-        today_str = date.today().strftime("%Y-%m-%d")
+        today = date.today()
         try:
-            today_data = await self.api.get_consumption_per_day(today_str)
+            today_data = await self.api.get_consumption_per_day(today)
             if today_data:
                 self._current_day_total = sum(
                     v for _, v in today_data if v is not None
@@ -160,17 +161,16 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         current = start
         while current <= up_to:
-            day_str = current.strftime("%Y-%m-%d")
             try:
-                day_data = await self.api.get_consumption_per_day(day_str)
+                day_data = await self.api.get_consumption_per_day(current)
                 if day_data:
                     day_total = sum(v for _, v in day_data if v is not None)
                     self._completed_days_total += day_total
                     _LOGGER.debug(
-                        "Processed day %s: %.3f kWh", day_str, day_total
+                        "Processed day %s: %.3f kWh", current.isoformat(), day_total
                     )
             except Exception:
-                _LOGGER.warning("Failed to fetch data for %s, skipping", day_str)
+                _LOGGER.warning("Failed to fetch data for %s, skipping", current.isoformat())
             current += timedelta(days=1)
 
         self._last_completed_date = up_to

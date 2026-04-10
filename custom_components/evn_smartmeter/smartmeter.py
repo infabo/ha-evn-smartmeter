@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date
 from typing import Any
 
 import httpx
@@ -30,10 +31,9 @@ class Smartmeter:
     API_BASE_URL = "https://smartmeter.netz-noe.at/orchestration"
 
     API_USER_DETAILS_URL = API_BASE_URL + "/User/GetBasicInfo"
-    API_ACCOUNTING_DETAILS_URL = (
-        API_BASE_URL + "/User/GetAccountIdByBussinespartnerId"
+    API_METERING_POINTS_URL = (
+        API_BASE_URL + "/User/GetMeteringPointsByBusinesspartnerId"
     )
-    API_METER_DETAILS_URL = API_BASE_URL + "/User/GetMeteringPointByAccountId"
     API_CONSUMPTION_URL = API_BASE_URL + "/ConsumptionRecord"
 
     def __init__(self, username: str, password: str) -> None:
@@ -41,7 +41,6 @@ class Smartmeter:
         self._password = password
         self._session: httpx.AsyncClient | None = None
         self._metering_point_id: str | None = None
-        self._account_id: str | None = None
 
     async def authenticate(self) -> bool:
         """Authenticate or validate existing session."""
@@ -109,54 +108,56 @@ class Smartmeter:
 
     async def get_user_details(self) -> dict[str, Any]:
         """Load user details."""
-        response = await self._call_api(self.API_USER_DETAILS_URL + "?context=2")
+        response = await self._call_api(
+            self.API_USER_DETAILS_URL, params={"context": "2"}
+        )
         return response.json()[0]
 
-    async def get_accounting_details(self) -> dict[str, Any]:
-        """Load accounting details."""
-        response = await self._call_api(
-            self.API_ACCOUNTING_DETAILS_URL + "?context=2"
-        )
-        entry = response.json()[0]
-        self._account_id = entry["accountId"]
-        return entry
+    async def get_meter_details(self) -> list[dict[str, Any]]:
+        """Load all metering points for the user.
 
-    async def get_meter_details(self) -> dict[str, Any]:
-        """Load meter details."""
-        if self._account_id is None:
-            await self.get_accounting_details()
+        Returns:
+            List of metering point dicts. The first entry is used by default.
+        """
         response = await self._call_api(
-            self.API_METER_DETAILS_URL
-            + "?context=2&accountId="
-            + (self._account_id or "")
+            self.API_METERING_POINTS_URL, params={"context": "2"}
         )
-        entry = response.json()[0]
-        self._metering_point_id = entry["meteringPointId"]
-        return entry
+        meters = response.json()
+        if not meters:
+            raise SmartmeterConnectionError("No metering points found for this account")
+        self._metering_point_id = meters[0]["meteringPointId"]
+        _LOGGER.debug(
+            "Found %d metering point(s), using %s",
+            len(meters),
+            self._metering_point_id,
+        )
+        return meters
 
     async def get_consumption_per_day(
-        self, day: str
+        self, day: date
     ) -> list[tuple[str, float | None]]:
         """Load consumption for one day (15-min intervals).
 
         Args:
-            day: Date string in format "YYYY-MM-DD".
+            day: date object for the day to fetch.
 
         Returns:
             List of (timestamp, consumption_kwh) tuples.
         """
-        _LOGGER.debug("Loading consumption for day %s", day)
+        # Portal uses non-padded format: YYYY-M-D
+        day_str = f"{day.year}-{day.month}-{day.day}"
+        _LOGGER.debug("Loading consumption for day %s", day_str)
         if self._metering_point_id is None:
             await self.get_meter_details()
         try:
             response = await self._call_api(
                 self.API_CONSUMPTION_URL + "/Day",
-                params={"meterId": self._metering_point_id, "day": day},
+                params={"meterId": self._metering_point_id, "day": day_str},
             )
             data = response.json()[0]
             return list(zip(data["peakDemandTimes"], data["meteredValues"]))
         except (httpx.RequestError, ValueError, KeyError, IndexError) as err:
-            _LOGGER.warning("Error fetching day consumption for %s: %s", day, err)
+            _LOGGER.warning("Error fetching day consumption for %s: %s", day_str, err)
             return []
 
     async def get_consumption_for_month(
