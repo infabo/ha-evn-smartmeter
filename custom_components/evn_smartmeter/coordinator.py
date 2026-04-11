@@ -52,8 +52,6 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Meter metadata
         self._meter_id: str | None = None
         self._metering_point_id: str | None = None
-        # One-time diagnostic flag
-        self._diag_done: bool = False
 
     @property
     def total_consumption(self) -> float:
@@ -120,35 +118,18 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 raise UpdateFailed(f"Error fetching meter details: {err}") from err
 
-        # One-time diagnostic: probe several days to find available data
-        if not self._diag_done:
-            self._diag_done = True
-            _LOGGER.debug("Running diagnostic: probing last 7 days for data")
-            for offset in range(0, 7):
-                probe_day = date.today() - timedelta(days=offset)
-                probe_data = await self.api.get_consumption_per_day(probe_day)
-                non_null = [v for v in probe_data if v is not None] if probe_data else []
-                _LOGGER.debug(
-                    "Probe %s: %d total values, %d non-null, sum=%.3f",
-                    probe_day.isoformat(),
-                    len(probe_data),
-                    len(non_null),
-                    sum(non_null) if non_null else 0.0,
-                )
+        today = date.today()
+        yesterday = today - timedelta(days=1)
 
-        yesterday = date.today() - timedelta(days=1)
-
-        # Process any unprocessed completed days (up to yesterday)
+        # Process completed days (accounts for ~1-2 day data delay)
         await self._process_completed_days(yesterday)
 
-        # Fetch today's running total (15-min intervals available so far)
-        today = date.today()
+        # Fetch today's running total (if available)
         try:
             today_data = await self.api.get_consumption_per_day(today)
             if today_data:
-                self._current_day_total = sum(
-                    v for v in today_data if v is not None
-                )
+                non_null = [v for v in today_data if v is not None]
+                self._current_day_total = sum(non_null) if non_null else 0.0
             else:
                 self._current_day_total = 0.0
         except Exception:
@@ -162,33 +143,61 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _process_completed_days(self, up_to: date) -> None:
-        """Process all completed days that haven't been counted yet."""
+        """Process all completed days that haven't been counted yet.
+
+        Data from the portal has ~1-2 day delay. We only advance
+        _last_completed_date past a day if it had data or is old
+        enough (>3 days) that data won't arrive anymore.
+        """
         if self._last_completed_date is not None and self._last_completed_date >= up_to:
             return
 
-        start = (
-            self._last_completed_date + timedelta(days=1)
-            if self._last_completed_date is not None
-            else up_to
-        )
+        if self._last_completed_date is not None:
+            start = self._last_completed_date + timedelta(days=1)
+        else:
+            # First run: go back far enough to find data despite delay
+            start = up_to - timedelta(days=5)
 
-        # Cap at 30 days to avoid excessive API calls on first run
+        # Cap at 30 days to avoid excessive API calls
         earliest = up_to - timedelta(days=30)
         if start < earliest:
             start = earliest
 
+        last_advanced = self._last_completed_date
         current = start
         while current <= up_to:
             try:
                 day_data = await self.api.get_consumption_per_day(current)
-                if day_data:
-                    day_total = sum(v for v in day_data if v is not None)
+                non_null = [v for v in day_data if v is not None] if day_data else []
+                if non_null:
+                    day_total = sum(non_null)
                     self._completed_days_total += day_total
+                    last_advanced = current
                     _LOGGER.debug(
                         "Processed day %s: %.3f kWh", current.isoformat(), day_total
                     )
+                else:
+                    # No data yet — only advance past this day if it's old enough
+                    days_ago = (up_to - current).days
+                    if days_ago >= 3:
+                        last_advanced = current
+                        _LOGGER.debug(
+                            "Skipping day %s (no data, %d days old)",
+                            current.isoformat(), days_ago,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Day %s has no data yet (%d days ago), will retry",
+                            current.isoformat(), days_ago,
+                        )
+                        # Stop advancing — retry this day next time
+                        break
             except Exception:
-                _LOGGER.warning("Failed to fetch data for %s, skipping", current.isoformat())
+                _LOGGER.warning(
+                    "Failed to fetch data for %s, will retry", current.isoformat()
+                )
+                break
             current += timedelta(days=1)
 
-        self._last_completed_date = up_to
+        if last_advanced is not None:
+            self._last_completed_date = last_advanced
