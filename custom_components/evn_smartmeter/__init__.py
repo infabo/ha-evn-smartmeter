@@ -20,12 +20,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EVN Smart Meter from a config entry."""
     coordinator = EVNSmartmeterCoordinator(hass, entry)
 
-    await coordinator.async_config_entry_first_refresh()
-
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # Set up sensors FIRST so restore_state runs before first data fetch
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    await coordinator.async_config_entry_first_refresh()
 
     return True
 

@@ -82,15 +82,23 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_day: float = 0.0,
     ) -> None:
         """Restore state from a previous session."""
+        if total <= 0 and last_date:
+            _LOGGER.debug(
+                "Skipping restore — no meaningful data (total=%.3f, last_date=%s)",
+                total, last_date,
+            )
+            return
         if last_date:
             self._last_completed_date = date.fromisoformat(last_date)
-            # The restored total includes completed days + last known current_day
-            # On restore, all of the restored total goes to completed_days
             self._completed_days_total = total - current_day
             self._current_day_total = current_day
         else:
             self._completed_days_total = total
             self._current_day_total = 0.0
+        _LOGGER.debug(
+            "Restored state: completed=%.3f, current_day=%.3f, last_date=%s",
+            self._completed_days_total, self._current_day_total, last_date,
+        )
 
     async def async_shutdown(self) -> None:
         """Clean up resources."""
