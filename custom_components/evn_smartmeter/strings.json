@@ -18,15 +18,5 @@
     "abort": {
       "already_configured": "This account is already configured"
     }
-  },
-  "entity": {
-    "sensor": {
-      "import": {
-        "name": "Import"
-      },
-      "monthly_consumption": {
-        "name": "Monthly consumption"
-      }
-    }
   }
 }

@@ -1,35 +1,28 @@
 """Sensor platform for EVN Smart Meter integration.
 
-Architecture follows enelgrid: a single sensor entity that fetches data from
-the portal and imports it as external statistics via async_add_external_statistics.
-The sensor state is just a status indicator ("Imported" / "No data" / "Error").
-All consumption data lives in HA statistics and is viewable in the Energy Dashboard.
+Architecture matches enelgrid (github.com/sathia-musso/enelgrid) exactly:
+- One import sensor that fetches data and saves to external statistics
+- One monthly sensor showing cumulative kWh for the current month
+- All 15-min consumption data lives in HA external statistics
 """
 
-from __future__ import annotations
-
 import logging
-import zoneinfo
 from datetime import date, datetime, timedelta
-from typing import Any
+import zoneinfo
 
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
 )
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
-from homeassistant.core import HomeAssistant
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util.dt import as_utc
 
 from .const import DOMAIN, SCAN_INTERVAL_HOURS
-from .errors import SmartmeterLoginError, SmartmeterConnectionError
+from .errors import SmartmeterConnectionError, SmartmeterLoginError
 from .smartmeter import Smartmeter
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,235 +31,222 @@ SCAN_INTERVAL = timedelta(hours=SCAN_INTERVAL_HOURS)
 LOOKBACK_DAYS = 7
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
+async def async_setup_entry(hass, entry, async_add_entities):
     """Set up EVN Smart Meter sensors from a config entry."""
-    monthly_sensor = EVNSmartmeterMonthlySensor(entry)
-    import_sensor = EVNSmartmeterSensor(hass, entry, monthly_sensor)
-    async_add_entities([import_sensor, monthly_sensor])
+    consumption_sensor = EVNSmartmeterSensor(hass, entry)
+    monthly_sensor = EVNSmartmeterMonthlySensor()
 
-    # Initial data fetch
-    hass.async_create_task(import_sensor.async_update())
+    hass.data.setdefault("evn_smartmeter_monthly_sensor", {})[
+        entry.entry_id
+    ] = monthly_sensor
+
+    async_add_entities([consumption_sensor, monthly_sensor])
+
+    _LOGGER.warning(
+        "EVN Smart Meter sensors added: %s, %s",
+        consumption_sensor.entity_id,
+        monthly_sensor.entity_id,
+    )
+
+    # Immediately fetch data
+    hass.async_create_task(consumption_sensor.async_update())
 
     # Schedule periodic updates
-    async def _scheduled_update(_now: Any) -> None:
-        await import_sensor.async_update()
+    async def scheduled_update(_):
+        await consumption_sensor.async_update()
 
-    async_track_time_interval(hass, _scheduled_update, SCAN_INTERVAL)
+    async_track_time_interval(hass, scheduled_update, SCAN_INTERVAL)
 
 
 class EVNSmartmeterSensor(SensorEntity):
-    """Sensor that fetches EVN smart meter data and imports it to HA statistics.
+    """Import sensor: fetches EVN data and saves to HA external statistics."""
 
-    The sensor state is a status string (e.g. "Imported", "No data", "Error").
-    Actual consumption data is stored as external statistics and viewable
-    in the Energy Dashboard and Developer Tools → Statistics.
-    """
-
-    _attr_has_entity_name = True
-    _attr_name = "EVN Smart Meter Import"
-
-    def __init__(
-        self, hass: HomeAssistant, entry: ConfigEntry,
-        monthly_sensor: EVNSmartmeterMonthlySensor,
-    ) -> None:
-        """Initialize the sensor."""
+    def __init__(self, hass, entry):
         self.hass = hass
-        self._entry = entry
-        self._monthly_sensor = monthly_sensor
-        self._attr_unique_id = f"{entry.entry_id}_import"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="EVN Smart Meter",
-            manufacturer="Netz Niederösterreich",
-            entry_type=DeviceEntryType.SERVICE,
-        )
-        self._state: str | None = None
-        self.api = Smartmeter(
-            entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD]
-        )
-        self._metering_point_id: str | None = None
+        self.entry_id = entry.entry_id
+        self._username = entry.data[CONF_USERNAME]
+        self._password = entry.data[CONF_PASSWORD]
+        self._attr_name = "EVN Smart Meter Import"
+        self._state = None
+        self._api = None
 
     @property
-    def native_value(self) -> str | None:
-        """Return the import status."""
+    def state(self):
         return self._state
 
-    async def async_update(self) -> None:
-        """Fetch consumption data from portal and import to HA statistics."""
+    async def async_update(self):
         try:
-            await self.api.authenticate()
-
-            if self._metering_point_id is None:
-                meters = await self.api.get_meter_details()
-                self._metering_point_id = meters[0].get("meteringPointId")
+            self._api = Smartmeter(self._username, self._password)
+            await self._api.authenticate()
+            await self._api.get_meter_details()
 
             today = date.today()
+            all_day_data = {}
 
-            # Fetch last N days (accounts for 1-2 day portal delay)
-            all_day_data: dict[date, list[float | None]] = {}
             for i in range(LOOKBACK_DAYS, 0, -1):
                 day = today - timedelta(days=i)
                 try:
-                    values = await self.api.get_consumption_per_day(day)
-                    non_null = [v for v in values if v is not None] if values else []
+                    values = await self._api.get_consumption_per_day(day)
+                    non_null = (
+                        [v for v in values if v is not None] if values else []
+                    )
                     if non_null:
                         all_day_data[day] = values
                 except Exception:
-                    _LOGGER.debug("No data available for %s", day.isoformat())
+                    _LOGGER.debug("No data for %s", day.isoformat())
 
             if all_day_data:
-                imported = await self._save_statistics(all_day_data)
-                self._state = f"{imported} days imported"
-                # Update monthly sensor with current month's total
+                await self.save_to_home_assistant(all_day_data)
                 self._update_monthly(all_day_data)
+                self._state = "Imported"
             else:
+                _LOGGER.warning("No consumption data found in lookback window")
                 self._state = "No data"
 
         except SmartmeterLoginError:
             self._state = "Login error"
-            raise ConfigEntryAuthFailed(
-                "Authentication failed. Check username/password."
-            )
         except SmartmeterConnectionError as err:
             _LOGGER.warning("Connection error: %s", err)
             self._state = "Connection error"
-        except ConfigEntryAuthFailed:
-            raise
         except Exception as err:
             _LOGGER.exception("Failed to update EVN data: %s", err)
             self._state = "Error"
+        finally:
+            if self._api:
+                await self._api.close()
 
-    async def _save_statistics(
-        self, all_data_by_date: dict[date, list[float | None]]
-    ) -> int:
+    async def save_to_home_assistant(self, all_data_by_date):
         """Save consumption data to HA external statistics.
 
-        Follows enelgrid pattern:
-        1. Read cumulative offset ONCE from DB
-        2. Only import days that are NEW (after last imported timestamp)
-        3. Track cumulative sum in memory across days
-
-        Returns the number of days imported.
+        Uses source="sensor" and statistic_id prefix "sensor:" to match
+        enelgrid's proven pattern for Energy Dashboard compatibility.
         """
-        statistic_id = f"{DOMAIN}:consumption"
+        statistic_id = "sensor:evn_smartmeter_consumption"
+
+        metadata = {
+            "has_mean": False,
+            "has_sum": True,
+            "name": "EVN Smart Meter Consumption",
+            "source": "sensor",
+            "statistic_id": statistic_id,
+            "unit_of_measurement": "kWh",
+        }
+
+        # Read cumulative offset ONCE from DB (enelgrid pattern)
+        cumulative_offset = await self.get_last_cumulative_kwh(statistic_id)
+        _LOGGER.info(
+            "Starting import with cumulative offset: %.2f kWh",
+            cumulative_offset,
+        )
+
+        # Get last imported date to skip already-imported days
+        last_imported_date = await self._get_last_imported_date(statistic_id)
+
         tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
-
-        # Read last imported state from DB
-        cumulative, last_imported_date = await self._get_last_state(statistic_id)
-
-        # Filter to only NEW days (after last imported data)
+        running_sum = 0.0
         sorted_days = sorted(all_data_by_date.keys())
-        if last_imported_date is not None:
+
+        if last_imported_date:
             sorted_days = [d for d in sorted_days if d > last_imported_date]
 
         if not sorted_days:
-            _LOGGER.debug("No new days to import (last imported: %s)", last_imported_date)
-            return 0
+            _LOGGER.debug(
+                "No new days to import (last: %s)", last_imported_date
+            )
+            return
 
-        metadata = {
-            "source": DOMAIN,
-            "name": "EVN Smart Meter Consumption",
-            "statistic_id": statistic_id,
-            "unit_of_measurement": "kWh",
-            "has_mean": False,
-            "has_sum": True,
-        }
-
-        days_imported = 0
         for day in sorted_days:
             values = all_data_by_date[day]
-            midnight = datetime.combine(day, datetime.min.time(), tzinfo=tz)
-            stats: list[dict[str, Any]] = []
+            stats = []
 
             for idx, value in enumerate(values):
                 if value is not None:
-                    cumulative += value
-                    ts = midnight + timedelta(minutes=idx * 15)
-                    stats.append({"start": as_utc(ts), "sum": cumulative})
+                    running_sum += value
+                    final_value = running_sum + cumulative_offset
+                    ts = datetime.combine(
+                        day, datetime.min.time(), tzinfo=tz
+                    ) + timedelta(minutes=idx * 15)
+                    stats.append(
+                        {
+                            "start": as_utc(ts),
+                            "sum": final_value,
+                        }
+                    )
 
             if stats:
                 async_add_external_statistics(self.hass, metadata, stats)
-                days_imported += 1
                 _LOGGER.info(
-                    "Imported %d points for %s (cumulative=%.3f kWh)",
-                    len(stats), day.isoformat(), cumulative,
+                    "Saved %d points for %s (sum=%.2f kWh)",
+                    len(stats),
+                    day.isoformat(),
+                    stats[-1]["sum"],
                 )
 
-        return days_imported
-
-    async def _get_last_state(
-        self, statistic_id: str
-    ) -> tuple[float, date | None]:
-        """Get last cumulative sum and date from statistics DB.
-
-        Returns (cumulative_sum, last_date) tuple.
-        """
+    async def get_last_cumulative_kwh(self, statistic_id):
+        """Get the last recorded cumulative kWh for a statistic."""
         last_stats = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
         )
-
         if last_stats and statistic_id in last_stats:
-            entry = last_stats[statistic_id][0]
-            cumulative = entry["sum"]
-            # Extract date from the last statistic's start timestamp
-            last_start = entry.get("start")
-            last_date = None
+            _LOGGER.info(
+                "Last cumulative sum for %s: %s",
+                statistic_id,
+                last_stats[statistic_id][0]["sum"],
+            )
+            return last_stats[statistic_id][0]["sum"]
+        return 0.0
+
+    async def _get_last_imported_date(self, statistic_id):
+        """Get the date of the last imported statistic."""
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
+        )
+        if last_stats and statistic_id in last_stats:
+            last_start = last_stats[statistic_id][0].get("start")
             if last_start is not None:
                 if isinstance(last_start, (int, float)):
-                    last_date = datetime.fromtimestamp(
-                        last_start, tz=zoneinfo.ZoneInfo(self.hass.config.time_zone)
-                    ).date()
+                    return datetime.fromtimestamp(last_start).date()
                 elif isinstance(last_start, datetime):
-                    last_date = last_start.date()
-            _LOGGER.debug(
-                "Last state: sum=%.3f, date=%s", cumulative, last_date
+                    return last_start.date()
+        return None
+
+    def _update_monthly(self, all_data_by_date):
+        """Update the monthly consumption sensor."""
+        try:
+            monthly_sensor = self.hass.data.get(
+                "evn_smartmeter_monthly_sensor", {}
+            ).get(self.entry_id)
+            if not monthly_sensor:
+                return
+
+            today = date.today()
+            total_kwh = sum(
+                sum(v for v in values if v is not None)
+                for day, values in all_data_by_date.items()
+                if day.year == today.year and day.month == today.month
             )
-            return cumulative, last_date
-
-        return 0.0, None
-
-    def _update_monthly(
-        self, all_data_by_date: dict[date, list[float | None]]
-    ) -> None:
-        """Sum up current month's fetched data and update monthly sensor."""
-        today = date.today()
-        month_total = 0.0
-        for day, values in all_data_by_date.items():
-            if day.year == today.year and day.month == today.month:
-                month_total += sum(v for v in values if v is not None)
-        self._monthly_sensor.set_total(month_total)
+            monthly_sensor.set_total(total_kwh)
+            _LOGGER.info("Updated monthly sensor to %.3f kWh", total_kwh)
+        except Exception as err:
+            _LOGGER.warning("Failed to update monthly sensor: %s", err)
 
 
 class EVNSmartmeterMonthlySensor(SensorEntity):
-    """Monthly cumulative consumption sensor."""
+    """Monthly cumulative total sensor."""
 
-    _attr_has_entity_name = True
-    _attr_name = "Monthly Consumption"
-    _attr_device_class = SensorDeviceClass.ENERGY
-    _attr_state_class = "total_increasing"
-    _attr_native_unit_of_measurement = "kWh"
-
-    def __init__(self, entry: ConfigEntry) -> None:
-        """Initialize the monthly sensor."""
-        self._attr_unique_id = f"{entry.entry_id}_monthly"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="EVN Smart Meter",
-            manufacturer="Netz Niederösterreich",
-            entry_type=DeviceEntryType.SERVICE,
-        )
-        self._state: float = 0
+    def __init__(self):
+        self.entity_id = "sensor.evn_smartmeter_monthly_consumption"
+        self._attr_name = "EVN Smart Meter Monthly Consumption"
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = "total_increasing"
+        self._attr_native_unit_of_measurement = "kWh"
+        self._state = 0
+        self._attr_extra_state_attributes = {"source": "evn_smartmeter"}
 
     @property
-    def native_value(self) -> float:
-        """Return the monthly total."""
+    def state(self):
         return self._state
 
-    def set_total(self, total: float) -> None:
-        """Update monthly total and write state."""
-        self._state = round(total, 3)
+    def set_total(self, new_total):
+        self._state = round(new_total, 3)
         self.async_write_ha_state()
