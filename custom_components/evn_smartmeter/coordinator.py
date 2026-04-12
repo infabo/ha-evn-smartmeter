@@ -19,8 +19,9 @@ from homeassistant.helpers.update_coordinator import (
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.recorder.statistics import (
-    async_import_statistics,
+    async_add_external_statistics,
 )
+from homeassistant.util.dt import as_utc
 from .smartmeter import Smartmeter
 from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
@@ -219,7 +220,7 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_completed_date = last_advanced
 
     async def _import_15min_statistics(self, day: date, values: list[float | None]) -> None:
-        """Import 15-min consumption values as recorder statistics."""
+        """Import 15-min consumption values as external statistics (like enelgrid)."""
         tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
         midnight = datetime.combine(day, datetime.min.time(), tzinfo=tz)
 
@@ -231,24 +232,21 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cumulative += value
                 timestamp = midnight + timedelta(minutes=idx * 15)
                 statistics.append({
-                    "start": timestamp,
+                    "start": as_utc(timestamp),
                     "sum": cumulative,
                 })
 
         if statistics:
             metadata = {
-                "source": "recorder",
-                "name": "EVN Smart Meter 15min",
-                "statistic_id": f"{DOMAIN}:energy_consumption_15min",
-                "unit_class": "energy",
+                "source": DOMAIN,
+                "name": "EVN Smart Meter 15min Consumption",
+                "statistic_id": f"sensor:{DOMAIN}_consumption_15min",
                 "unit_of_measurement": "kWh",
-                "mean_type": StatisticMeanType.NONE,
+                "has_mean": False,
                 "has_sum": True,
             }
             try:
-                await get_instance(self.hass).async_add_executor_job(
-                    async_import_statistics, self.hass, metadata, statistics
-                )
+                async_add_external_statistics(self.hass, metadata, statistics)
                 _LOGGER.debug(
                     "Imported %d 15-min statistics for %s",
                     len(statistics),
