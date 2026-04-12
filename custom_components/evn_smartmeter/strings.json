@@ -26,6 +26,9 @@
       },
       "daily_consumption": {
         "name": "Daily consumption"
+      },
+      "consumption_15min": {
+        "name": "15min consumption graph"
       }
     }
   }

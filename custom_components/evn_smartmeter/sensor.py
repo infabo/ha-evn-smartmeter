@@ -42,6 +42,15 @@ SENSOR_DAILY = SensorEntityDescription(
     suggested_display_precision=2,
 )
 
+SENSOR_15MIN = SensorEntityDescription(
+    key="consumption_15min",
+    translation_key="consumption_15min",
+    device_class=SensorDeviceClass.ENERGY,
+    state_class=SensorStateClass.TOTAL_INCREASING,
+    native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    suggested_display_precision=3,
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -55,6 +64,7 @@ async def async_setup_entry(
         [
             EVNSmartmeterTotalSensor(coordinator, entry),
             EVNSmartmeterDailySensor(coordinator, entry),
+            EVNSmartmeter15MinSensor(coordinator, entry),
         ]
     )
 
@@ -156,3 +166,23 @@ class EVNSmartmeterDailySensor(EVNSmartmeterBaseSensor):
         from datetime import datetime, time
 
         return datetime.combine(datetime.today(), time.min)
+
+
+class EVNSmartmeter15MinSensor(EVNSmartmeterBaseSensor):
+    """Sensor for 15-min consumption with full graph history."""
+
+    def __init__(
+        self,
+        coordinator: EVNSmartmeterCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the 15-min consumption sensor."""
+        super().__init__(coordinator, entry, SENSOR_15MIN)
+
+    @property
+    def native_value(self) -> float | None:
+        """Return latest 15-min consumption value (cumulative)."""
+        if self.coordinator.data is None:
+            return None
+        # Return the total consumption (statistics will show the 96 points)
+        return round(self.coordinator.total_consumption, 3)
