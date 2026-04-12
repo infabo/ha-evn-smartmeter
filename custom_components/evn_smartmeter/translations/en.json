@@ -21,11 +21,11 @@
   },
   "entity": {
     "sensor": {
-      "total_consumption": {
-        "name": "Total consumption"
+      "import": {
+        "name": "Import"
       },
-      "daily_consumption": {
-        "name": "Daily consumption"
+      "monthly_consumption": {
+        "name": "Monthly consumption"
       }
     }
   }
