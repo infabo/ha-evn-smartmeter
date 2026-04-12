@@ -15,7 +15,11 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .smartmeter import Smartmeter
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.models import StatisticMeanType
+from homeassistant.components.recorder.statistics import (
+    async_import_statistics,
+)
 from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
 from .const import DOMAIN, DEFAULT_SCAN_INTERVAL_MINUTES
@@ -181,6 +185,8 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     day_total = sum(non_null)
                     self._completed_days_total += day_total
                     last_advanced = current
+                    # Import 15-min statistics for this day
+                    await self._import_15min_statistics(current, day_data)
                     _LOGGER.debug(
                         "Processed day %s: %.3f kWh", current.isoformat(), day_total
                     )
@@ -209,3 +215,46 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if last_advanced is not None:
             self._last_completed_date = last_advanced
+
+    async def _import_15min_statistics(self, day: date, values: list[float | None]) -> None:
+        """Import 15-min consumption values as recorder statistics."""
+        tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
+        midnight = datetime.combine(day, datetime.min.time(), tzinfo=tz)
+
+        statistics: list[dict[str, Any]] = []
+        cumulative = 0.0
+
+        for idx, value in enumerate(values):
+            if value is not None:
+                cumulative += value
+                timestamp = midnight + timedelta(minutes=idx * 15)
+                statistics.append({
+                    "start": timestamp,
+                    "sum": cumulative,
+                })
+
+        if statistics:
+            metadata = {
+                "source": "recorder",
+                "name": "EVN Smart Meter 15min",
+                "statistic_id": f"{DOMAIN}:energy_consumption_15min",
+                "unit_class": "energy",
+                "unit_of_measurement": "kWh",
+                "mean_type": StatisticMeanType.NONE,
+                "has_sum": True,
+            }
+            try:
+                await get_instance(self.hass).async_add_executor_job(
+                    async_import_statistics, self.hass, metadata, statistics
+                )
+                _LOGGER.debug(
+                    "Imported %d 15-min statistics for %s",
+                    len(statistics),
+                    day.isoformat(),
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Failed to import 15-min statistics for %s: %s",
+                    day.isoformat(),
+                    err,
+                )
