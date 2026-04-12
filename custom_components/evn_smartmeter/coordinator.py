@@ -17,9 +17,9 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
+    get_last_statistics,
 )
 from homeassistant.util.dt import as_utc
 from .smartmeter import Smartmeter
@@ -220,12 +220,22 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_completed_date = last_advanced
 
     async def _import_15min_statistics(self, day: date, values: list[float | None]) -> None:
-        """Import 15-min consumption values as external statistics (like enelgrid)."""
+        """Import 15-min consumption values as external statistics (like enelgrid).
+
+        Uses source="sensor" and a monotonically increasing cumulative sum,
+        reading the last known sum from the DB so data across days is continuous.
+        """
         tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
         midnight = datetime.combine(day, datetime.min.time(), tzinfo=tz)
 
+        # Build statistic_id: must match "sensor:{object_id}" with source="sensor"
+        statistic_id = f"{DOMAIN}:consumption_15min"
+
+        # Read the last cumulative sum from the statistics DB
+        cumulative_offset = await self._get_last_cumulative_sum(statistic_id)
+
         statistics: list[dict[str, Any]] = []
-        cumulative = 0.0
+        cumulative = cumulative_offset
 
         for idx, value in enumerate(values):
             if value is not None:
@@ -240,7 +250,7 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             metadata = {
                 "source": DOMAIN,
                 "name": "EVN Smart Meter 15min Consumption",
-                "statistic_id": f"sensor:{DOMAIN}_consumption_15min",
+                "statistic_id": statistic_id,
                 "unit_of_measurement": "kWh",
                 "has_mean": False,
                 "has_sum": True,
@@ -248,9 +258,11 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 async_add_external_statistics(self.hass, metadata, statistics)
                 _LOGGER.debug(
-                    "Imported %d 15-min statistics for %s",
+                    "Imported %d 15-min statistics for %s (offset=%.3f, final=%.3f)",
                     len(statistics),
                     day.isoformat(),
+                    cumulative_offset,
+                    cumulative,
                 )
             except Exception as err:
                 _LOGGER.warning(
@@ -258,3 +270,17 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     day.isoformat(),
                     err,
                 )
+
+    async def _get_last_cumulative_sum(self, statistic_id: str) -> float:
+        """Get the last recorded cumulative sum for a given statistic_id."""
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
+        )
+
+        if last_stats and statistic_id in last_stats:
+            result = last_stats[statistic_id][0]["sum"]
+            _LOGGER.debug(
+                "Last cumulative sum for %s: %.3f", statistic_id, result
+            )
+            return result
+        return 0.0
