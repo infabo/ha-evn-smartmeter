@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+import zoneinfo
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -20,6 +21,7 @@ from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.recorder.statistics import (
     async_import_statistics,
 )
+from .smartmeter import Smartmeter
 from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
 from .const import DOMAIN, DEFAULT_SCAN_INTERVAL_MINUTES
