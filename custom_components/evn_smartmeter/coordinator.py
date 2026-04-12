@@ -178,6 +178,16 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if start < earliest:
             start = earliest
 
+        # Read the cumulative offset ONCE before the loop (like enelgrid).
+        # async_add_external_statistics doesn't commit to DB immediately,
+        # so reading per-day would return stale values.
+        statistic_id = f"{DOMAIN}:consumption_15min"
+        cumulative_offset = await self._get_last_cumulative_sum(statistic_id)
+        _LOGGER.debug(
+            "Starting day processing with cumulative offset: %.3f kWh",
+            cumulative_offset,
+        )
+
         last_advanced = self._last_completed_date
         current = start
         while current <= up_to:
@@ -188,10 +198,13 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     day_total = sum(non_null)
                     self._completed_days_total += day_total
                     last_advanced = current
-                    # Import 15-min statistics for this day
-                    await self._import_15min_statistics(current, day_data)
+                    # Import 15-min statistics, tracking offset in memory
+                    cumulative_offset = await self._import_15min_statistics(
+                        current, day_data, cumulative_offset
+                    )
                     _LOGGER.debug(
-                        "Processed day %s: %.3f kWh", current.isoformat(), day_total
+                        "Processed day %s: %.3f kWh (cumulative: %.3f)",
+                        current.isoformat(), day_total, cumulative_offset,
                     )
                 else:
                     # No data yet — only advance past this day if it's old enough
@@ -219,20 +232,23 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if last_advanced is not None:
             self._last_completed_date = last_advanced
 
-    async def _import_15min_statistics(self, day: date, values: list[float | None]) -> None:
-        """Import 15-min consumption values as external statistics (like enelgrid).
+    async def _import_15min_statistics(
+        self, day: date, values: list[float | None], cumulative_offset: float
+    ) -> float:
+        """Import 15-min consumption values as external statistics.
 
-        Uses source="sensor" and a monotonically increasing cumulative sum,
-        reading the last known sum from the DB so data across days is continuous.
+        Args:
+            day: The date to import.
+            values: List of 96 consumption values (15-min intervals).
+            cumulative_offset: The running cumulative sum from previous days.
+
+        Returns:
+            The updated cumulative sum after this day's data (for chaining).
         """
         tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
         midnight = datetime.combine(day, datetime.min.time(), tzinfo=tz)
 
-        # Build statistic_id: must match "sensor:{object_id}" with source="sensor"
         statistic_id = f"{DOMAIN}:consumption_15min"
-
-        # Read the last cumulative sum from the statistics DB
-        cumulative_offset = await self._get_last_cumulative_sum(statistic_id)
 
         statistics: list[dict[str, Any]] = []
         cumulative = cumulative_offset
@@ -257,7 +273,7 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
             try:
                 async_add_external_statistics(self.hass, metadata, statistics)
-                _LOGGER.debug(
+                _LOGGER.info(
                     "Imported %d 15-min statistics for %s (offset=%.3f, final=%.3f)",
                     len(statistics),
                     day.isoformat(),
@@ -270,6 +286,8 @@ class EVNSmartmeterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     day.isoformat(),
                     err,
                 )
+
+        return cumulative
 
     async def _get_last_cumulative_sum(self, statistic_id: str) -> float:
         """Get the last recorded cumulative sum for a given statistic_id."""
