@@ -118,13 +118,15 @@ class EVNSmartmeterSensor(SensorEntity):
     async def save_to_home_assistant(self, all_data_by_date):
         """Save consumption data to HA external statistics.
 
-        Matches enelgrid save_to_home_assistant exactly.
+        EVN provides 15-min interval data; HA requires hourly timestamps.
+        We aggregate 4 intervals per hour and use top-of-hour timestamps.
         """
         statistic_id = "sensor:evn_smartmeter_consumption"
 
         metadata = {
             "has_mean": False,
             "has_sum": True,
+            "mean_type": "none",
             "name": "EVN Smart Meter Consumption",
             "source": "sensor",
             "statistic_id": statistic_id,
@@ -135,25 +137,31 @@ class EVNSmartmeterSensor(SensorEntity):
 
         running_sum = 0.0
         for day_date, values in sorted(all_data_by_date.items()):
-            stats = []
+            # Aggregate 15-min values into hourly buckets
+            hourly_sums = {}
             for idx, value in enumerate(values):
                 if value is not None:
-                    running_sum += value
-                    final_value = running_sum + cumulative_offset
-                    ts = datetime.combine(
-                        day_date, datetime.min.time()
-                    ) + timedelta(minutes=idx * 15)
-                    stats.append(
-                        {
-                            "start": as_utc(ts),
-                            "sum": final_value,
-                        }
-                    )
+                    hour = idx // 4
+                    hourly_sums[hour] = hourly_sums.get(hour, 0.0) + value
+
+            stats = []
+            for hour in sorted(hourly_sums):
+                running_sum += hourly_sums[hour]
+                final_value = running_sum + cumulative_offset
+                ts = datetime.combine(
+                    day_date, datetime.min.time()
+                ) + timedelta(hours=hour)
+                stats.append(
+                    {
+                        "start": as_utc(ts),
+                        "sum": final_value,
+                    }
+                )
 
             if stats:
                 async_add_external_statistics(self.hass, metadata, stats)
                 _LOGGER.info(
-                    "Saved %d points for %s", len(stats), day_date.isoformat()
+                    "Saved %d hourly points for %s", len(stats), day_date.isoformat()
                 )
 
     async def get_last_cumulative_kwh(self, statistic_id):
