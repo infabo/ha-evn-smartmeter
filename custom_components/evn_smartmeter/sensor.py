@@ -7,7 +7,7 @@ Architecture matches enelgrid (github.com/sathia-musso/enelgrid) exactly:
 """
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
@@ -17,16 +17,15 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time
 from homeassistant.util.dt import as_utc
 
-from .const import DOMAIN, SCAN_INTERVAL_HOURS
+from .const import DAILY_UPDATE_HOUR, DOMAIN
 from .errors import SmartmeterConnectionError, SmartmeterLoginError
 from .smartmeter import Smartmeter
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(hours=SCAN_INTERVAL_HOURS)
 LOOKBACK_DAYS = 7
 
 
@@ -47,14 +46,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
         monthly_sensor.entity_id,
     )
 
-    # Immediately fetch data
+    # Immediately fetch data on startup
     hass.async_create_task(consumption_sensor.async_update())
 
-    # Schedule periodic updates
-    async def scheduled_update(_):
+    # Schedule daily fetch at DAILY_UPDATE_HOUR:00
+    async def scheduled_update(_now):
+        _LOGGER.debug("Daily scheduled update triggered")
         await consumption_sensor.async_update()
 
-    async_track_time_interval(hass, scheduled_update, SCAN_INTERVAL)
+    async_track_time(hass, scheduled_update, time(DAILY_UPDATE_HOUR, 0, 0))
 
 
 class EVNSmartmeterSensor(SensorEntity):
@@ -74,6 +74,7 @@ class EVNSmartmeterSensor(SensorEntity):
         return self._state
 
     async def async_update(self):
+        _LOGGER.debug("Starting EVN data fetch (lookback %d days)", LOOKBACK_DAYS)
         try:
             self._api = Smartmeter(self._username, self._password)
             await self._api.authenticate()

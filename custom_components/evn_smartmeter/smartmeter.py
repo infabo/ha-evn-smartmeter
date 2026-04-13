@@ -183,7 +183,7 @@ class Smartmeter:
                 sum(non_null) if non_null else 0.0,
             )
             return values
-        except (httpx.RequestError, ValueError, KeyError, IndexError) as err:
+        except (httpx.RequestError, ValueError, KeyError, IndexError, SmartmeterConnectionError) as err:
             _LOGGER.warning("Error fetching day consumption for %s: %s", day_str, err)
             return []
 

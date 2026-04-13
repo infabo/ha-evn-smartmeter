@@ -1,4 +1,4 @@
 """Constants for the EVN Smart Meter integration."""
 
 DOMAIN = "evn_smartmeter"
-SCAN_INTERVAL_HOURS = 4
+DAILY_UPDATE_HOUR = 6  # Fetch at 06:00 daily; EVN data for the previous day is available by then
