@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    get_last_statistics,
+    clear_statistics,
 )
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
@@ -123,6 +123,12 @@ class EVNSmartmeterSensor(SensorEntity):
         """
         statistic_id = "sensor:evn_smartmeter_consumption"
 
+        # Clear old statistics before importing fresh data
+        recorder = get_instance(self.hass)
+        await recorder.async_add_executor_job(
+            clear_statistics, recorder, [statistic_id]
+        )
+
         metadata = {
             "has_mean": False,
             "has_sum": True,
@@ -133,8 +139,6 @@ class EVNSmartmeterSensor(SensorEntity):
             "unit_class": "energy",
             "unit_of_measurement": "kWh",
         }
-
-        cumulative_offset = await self.get_last_cumulative_kwh(statistic_id)
 
         running_sum = 0.0
         for day_date, values in sorted(all_data_by_date.items()):
@@ -148,14 +152,13 @@ class EVNSmartmeterSensor(SensorEntity):
             stats = []
             for hour in sorted(hourly_sums):
                 running_sum += hourly_sums[hour]
-                final_value = running_sum + cumulative_offset
                 ts = datetime.combine(
                     day_date, datetime.min.time()
                 ) + timedelta(hours=hour)
                 stats.append(
                     {
                         "start": as_utc(ts),
-                        "sum": final_value,
+                        "sum": running_sum,
                     }
                 )
 
@@ -164,15 +167,6 @@ class EVNSmartmeterSensor(SensorEntity):
                 _LOGGER.info(
                     "Saved %d hourly points for %s", len(stats), day_date.isoformat()
                 )
-
-    async def get_last_cumulative_kwh(self, statistic_id):
-        """Get the last recorded cumulative kWh for a statistic."""
-        last_stats = await get_instance(self.hass).async_add_executor_job(
-            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
-        )
-        if last_stats and statistic_id in last_stats:
-            return last_stats[statistic_id][0]["sum"]
-        return 0.0
 
     def _update_monthly(self, all_data_by_date):
         """Update the monthly consumption sensor."""
