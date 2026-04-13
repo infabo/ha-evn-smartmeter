@@ -17,15 +17,16 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util.dt import as_utc
 
-from .const import DAILY_UPDATE_HOUR, DOMAIN
+from .const import DOMAIN
 from .errors import SmartmeterConnectionError, SmartmeterLoginError
 from .smartmeter import Smartmeter
 
 _LOGGER = logging.getLogger(__name__)
 
+SCAN_INTERVAL = timedelta(days=1)
 LOOKBACK_DAYS = 7
 
 
@@ -49,12 +50,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Immediately fetch data on startup
     hass.async_create_task(consumption_sensor.async_update())
 
-    # Schedule daily fetch at DAILY_UPDATE_HOUR:00
+    # Schedule daily fetch (once every 24h, same pattern as enelgrid)
     async def scheduled_update(_now):
         _LOGGER.debug("Daily scheduled update triggered")
         await consumption_sensor.async_update()
 
-    async_track_time_change(hass, scheduled_update, hour=DAILY_UPDATE_HOUR, minute=0, second=0)
+    async_track_time_interval(hass, scheduled_update, SCAN_INTERVAL)
 
 
 class EVNSmartmeterSensor(SensorEntity):
