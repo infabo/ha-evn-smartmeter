@@ -9,10 +9,8 @@ Architecture matches enelgrid (github.com/sathia-musso/enelgrid):
 import logging
 from datetime import date, datetime, timedelta
 
-from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    clear_statistics,
     get_last_statistics,
 )
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
@@ -134,21 +132,14 @@ class EVNSmartmeterSensor(SensorEntity):
         2. Build cumulative hourly sums
         3. Insert via async_add_external_statistics
         """
-        statistic_id = "sensor:evn_smartmeter_consumption"
-
-        # Clear consumption statistics before reimport
-        recorder = get_instance(self.hass)
-        await recorder.async_add_executor_job(
-            clear_statistics, recorder, [statistic_id]
-        )
-        _LOGGER.debug("Cleared old statistics for %s", statistic_id)
+        statistic_id = "evn_smartmeter:consumption"
 
         metadata = {
             "has_mean": False,
             "has_sum": True,
             "mean_type": 0,
             "name": "EVN Smart Meter Consumption",
-            "source": "sensor",
+            "source": "evn_smartmeter",
             "statistic_id": statistic_id,
             "unit_class": "energy",
             "unit_of_measurement": "kWh",
