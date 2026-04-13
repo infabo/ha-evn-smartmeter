@@ -59,6 +59,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
 class EVNSmartmeterSensor(SensorEntity):
     """Import sensor: fetches EVN data and saves to HA external statistics."""
 
+    _attr_should_poll = False
+
     def __init__(self, hass, entry):
         self.hass = hass
         self.entry_id = entry.entry_id
