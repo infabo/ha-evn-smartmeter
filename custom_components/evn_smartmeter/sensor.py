@@ -118,8 +118,11 @@ class EVNSmartmeterSensor(SensorEntity):
     async def save_to_home_assistant(self, all_data_by_date):
         """Save consumption data to HA external statistics.
 
-        Uses source="sensor" and statistic_id prefix "sensor:" to match
-        enelgrid's proven pattern for Energy Dashboard compatibility.
+        Matches enelgrid pattern exactly:
+        - source="sensor", statistic_id prefix "sensor:"
+        - Read cumulative offset ONCE from DB
+        - Always import ALL fetched days (async_add_external_statistics upserts)
+        - No skip logic — ensures no day is ever missed
         """
         statistic_id = "sensor:evn_smartmeter_consumption"
 
@@ -132,28 +135,11 @@ class EVNSmartmeterSensor(SensorEntity):
             "unit_of_measurement": "kWh",
         }
 
-        # Read cumulative offset ONCE from DB (enelgrid pattern)
         cumulative_offset = await self.get_last_cumulative_kwh(statistic_id)
-        _LOGGER.info(
-            "Starting import with cumulative offset: %.2f kWh",
-            cumulative_offset,
-        )
-
-        # Get last imported date to skip already-imported days
-        last_imported_date = await self._get_last_imported_date(statistic_id)
 
         tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
         running_sum = 0.0
         sorted_days = sorted(all_data_by_date.keys())
-
-        if last_imported_date:
-            sorted_days = [d for d in sorted_days if d > last_imported_date]
-
-        if not sorted_days:
-            _LOGGER.debug(
-                "No new days to import (last: %s)", last_imported_date
-            )
-            return
 
         for day in sorted_days:
             values = all_data_by_date[day]
@@ -175,12 +161,12 @@ class EVNSmartmeterSensor(SensorEntity):
 
             if stats:
                 async_add_external_statistics(self.hass, metadata, stats)
-                _LOGGER.info(
-                    "Saved %d points for %s (sum=%.2f kWh)",
-                    len(stats),
-                    day.isoformat(),
-                    stats[-1]["sum"],
-                )
+
+        _LOGGER.warning(
+            "[EVN] Imported %d days, final sum=%.2f kWh",
+            len(sorted_days),
+            running_sum + cumulative_offset,
+        )
 
     async def get_last_cumulative_kwh(self, statistic_id):
         """Get the last recorded cumulative kWh for a statistic."""
@@ -188,27 +174,8 @@ class EVNSmartmeterSensor(SensorEntity):
             get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
         )
         if last_stats and statistic_id in last_stats:
-            _LOGGER.info(
-                "Last cumulative sum for %s: %s",
-                statistic_id,
-                last_stats[statistic_id][0]["sum"],
-            )
             return last_stats[statistic_id][0]["sum"]
         return 0.0
-
-    async def _get_last_imported_date(self, statistic_id):
-        """Get the date of the last imported statistic."""
-        last_stats = await get_instance(self.hass).async_add_executor_job(
-            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
-        )
-        if last_stats and statistic_id in last_stats:
-            last_start = last_stats[statistic_id][0].get("start")
-            if last_start is not None:
-                if isinstance(last_start, (int, float)):
-                    return datetime.fromtimestamp(last_start).date()
-                elif isinstance(last_start, datetime):
-                    return last_start.date()
-        return None
 
     def _update_monthly(self, all_data_by_date):
         """Update the monthly consumption sensor."""
