@@ -130,6 +130,7 @@ class EVNSmartmeterSensor(SensorEntity):
             "name": "EVN Smart Meter Consumption",
             "source": "sensor",
             "statistic_id": statistic_id,
+            "unit_class": "energy",
             "unit_of_measurement": "kWh",
         }
 
