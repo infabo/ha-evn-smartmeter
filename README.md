@@ -1,19 +1,20 @@
 # EVN Smart Meter – Home Assistant Integration
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz/)
-[![HA Version](https://img.shields.io/badge/HA-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
+[![HA Version](https://img.shields.io/badge/HA-2026.1%2B-blue.svg)](https://www.home-assistant.io/)
 
 Inoffizielle Home Assistant Integration für das [EVN / Netz Niederösterreich Smart Meter Portal](https://smartmeter.netz-noe.at/).
 
-Zeigt Stromverbrauchsdaten deines Smart Meters als Sensoren in Home Assistant an – kompatibel mit dem **Energy Dashboard**.
+Importiert Stromverbrauchsdaten deines Smart Meters als **externe Statistiken** in Home Assistant – kompatibel mit dem **Energy Dashboard**.
 
 ## Features
 
-- 🔌 **Gesamtverbrauch** – kumulativer Zählerstand (kWh), kompatibel mit dem Energy Dashboard
-- 📊 **Tagesverbrauch** – aktueller Verbrauch des heutigen Tages (kWh)
-- 🔄 Automatisches Update alle 30 Minuten (Smart Meter sendet 15-Min-Intervalle)
+- 📊 **Externer Statistik-Import** – stündliche Verbrauchsdaten (kWh) als HA-Statistik (`evn_smartmeter:consumption`), kompatibel mit dem Energy Dashboard
+- 📅 **Monatsverbrauch** – kumulativer Verbrauch des aktuellen Monats als Sensor (kWh)
+- 🔄 **Täglicher Fetch um 06:00** – automatisch via `async_track_time_change`
+- 🔄 **Sofortiger Fetch bei Reload** – Daten werden auch beim Neuladen der Integration abgerufen
 - 🔐 Login über Username/Password des Smart Meter Portals
-- 💾 Zustand wird über HA-Neustarts hinweg beibehalten
+- 📆 **7-Tage-Lookback** – importiert die letzten 7 Tage bei jedem Fetch
 
 ## Installation (HACS)
 
@@ -28,31 +29,42 @@ Zeigt Stromverbrauchsdaten deines Smart Meters als Sensoren in Home Assistant an
 1. **Einstellungen** → **Geräte & Dienste** → **Integration hinzufügen**
 2. Nach „EVN Smart Meter" suchen
 3. Zugangsdaten für [smartmeter.netz-noe.at](https://smartmeter.netz-noe.at/) eingeben
-4. Fertig! Die Sensoren werden automatisch erstellt.
+4. Fertig! Die Sensoren werden automatisch erstellt und der erste Datenimport startet sofort.
 
 ## Energy Dashboard
 
 1. **Einstellungen** → **Dashboards** → **Energie**
 2. Unter „Stromnetz" → **Verbrauch hinzufügen**
-3. Sensor „EVN Smart Meter Total consumption" auswählen
+3. Statistik `evn_smartmeter:consumption` auswählen
 4. Speichern
 
-## Sensoren
+## Sensoren & Statistiken
 
-| Sensor | Beschreibung | State Class | Einheit |
-|--------|-------------|-------------|---------|
-| Total consumption | Kumulativer Gesamtverbrauch | `total_increasing` | kWh |
-| Daily consumption | Heutiger Tagesverbrauch | `total` | kWh |
+| Name | Typ | Beschreibung | Einheit |
+|------|-----|-------------|---------|
+| EVN Smart Meter Import | Sensor | Zeigt den Import-Status (`Imported`, `No data`, `Error`, …) | – |
+| EVN Smart Meter Monthly Consumption | Sensor | Kumulativer Verbrauch des aktuellen Monats | kWh |
+| evn_smartmeter:consumption | Externe Statistik | Stündliche Verbrauchsdaten für das Energy Dashboard | kWh |
+
+## Architektur
+
+Die Integration folgt dem Muster der [enelgrid](https://github.com/sathia-musso/enelgrid) Integration:
+
+- Die 15-Minuten-Intervalle der EVN API werden zu **stündlichen** Werten aggregiert (HA-Statistiken erfordern Top-of-Hour-Timestamps)
+- Daten werden als **externe Statistiken** gespeichert (`async_add_external_statistics`), nicht als Entity-States
+- Der Import-Sensor (`should_poll = False`) triggert keine automatischen Updates – nur der tägliche Timer und Reload lösen Fetches aus
+- Bei jedem Fetch werden die letzten 7 Tage importiert (Upsert – vorhandene Stunden werden aktualisiert)
 
 ## Hinweise
 
-- Die Daten stammen von der privaten API des Smart Meter Portals und können mit einer Verzögerung von einigen Minuten bis Stunden eintreffen.
-- Der Gesamtverbrauch startet bei 0 ab dem Zeitpunkt der Installation. Historische Daten werden nicht rückwirkend importiert.
-- Die Integration nutzt die [PyNoeSmartmeter](https://github.com/Xlinx64/PyNoeSmartmeter) Library.
+- Die Daten stammen von der API des Smart Meter Portals und sind typischerweise am nächsten Morgen verfügbar.
+- Der erste Fetch nach Installation importiert sofort die letzten 7 Tage.
+- Die Integration nutzt einen vendored [PyNoeSmartmeter](https://github.com/Xlinx64/PyNoeSmartmeter) Client.
 
 ## Credits
 
 - [PyNoeSmartmeter](https://github.com/Xlinx64/PyNoeSmartmeter) von David Illichmann – Python-Wrapper für die Netz NÖ API
+- [enelgrid](https://github.com/sathia-musso/enelgrid) – Referenz-Integration für das Architektur-Pattern
 - [EVN Smartmeter Wrapper](https://www.lteforum.at/mobilfunk/evn-smartmeter-api-wrapper-influx-importer-grafana-dashboard.21319/) von A.E.I.O.U.
 
 ## Lizenz

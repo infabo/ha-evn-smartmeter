@@ -129,10 +129,8 @@ class EVNSmartmeterSensor(SensorEntity):
     async def save_to_home_assistant(self, all_data_by_date):
         """Save consumption data to HA external statistics.
 
-        Follows enelgrid pattern:
-        1. Clear old statistics
-        2. Build cumulative hourly sums
-        3. Insert via async_add_external_statistics
+        Aggregates 15-min EVN intervals into hourly buckets,
+        builds a cumulative sum, and upserts via async_add_external_statistics.
         """
         statistic_id = "evn_smartmeter:consumption"
 
