@@ -7,7 +7,7 @@ Architecture matches enelgrid (github.com/sathia-musso/enelgrid) exactly:
 """
 
 import logging
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
@@ -17,7 +17,7 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.event import async_track_time
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.util.dt import as_utc
 
 from .const import DAILY_UPDATE_HOUR, DOMAIN
@@ -54,7 +54,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         _LOGGER.debug("Daily scheduled update triggered")
         await consumption_sensor.async_update()
 
-    async_track_time(hass, scheduled_update, time(DAILY_UPDATE_HOUR, 0, 0))
+    async_track_time_change(hass, scheduled_update, hour=DAILY_UPDATE_HOUR, minute=0, second=0)
 
 
 class EVNSmartmeterSensor(SensorEntity):
