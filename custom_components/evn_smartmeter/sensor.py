@@ -1,9 +1,9 @@
 """Sensor platform for EVN Smart Meter integration.
 
-Architecture matches enelgrid (github.com/sathia-musso/enelgrid) exactly:
+Architecture matches enelgrid (github.com/sathia-musso/enelgrid):
 - One import sensor that fetches data and saves to external statistics
 - One monthly sensor showing cumulative kWh for the current month
-- All 15-min consumption data lives in HA external statistics
+- All consumption data lives in HA external statistics
 """
 
 import logging
@@ -13,10 +13,11 @@ from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     clear_statistics,
+    get_last_statistics,
 )
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.util.dt import as_utc
 
@@ -46,7 +47,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         monthly_sensor.entity_id,
     )
 
-    # Immediately fetch data on startup
+    # Immediately fetch data on startup / reload
     hass.async_create_task(consumption_sensor.async_update())
 
     # Schedule daily fetch at 06:00
@@ -92,6 +93,12 @@ class EVNSmartmeterSensor(SensorEntity):
                     )
                     if non_null:
                         all_day_data[day] = values
+                        _LOGGER.debug(
+                            "Day %s: %d non-null values, sum=%.3f kWh",
+                            day.isoformat(),
+                            len(non_null),
+                            sum(non_null),
+                        )
                 except Exception:
                     _LOGGER.debug("No data for %s", day.isoformat())
 
@@ -99,11 +106,15 @@ class EVNSmartmeterSensor(SensorEntity):
                 await self.save_to_home_assistant(all_day_data)
                 self._update_monthly(all_day_data)
                 self._state = "Imported"
+                _LOGGER.warning(
+                    "EVN import complete: %d days imported", len(all_day_data)
+                )
             else:
                 _LOGGER.warning("No consumption data found in lookback window")
                 self._state = "No data"
 
         except SmartmeterLoginError:
+            _LOGGER.error("EVN login failed, check credentials")
             self._state = "Login error"
         except SmartmeterConnectionError as err:
             _LOGGER.warning("Connection error: %s", err)
@@ -118,21 +129,24 @@ class EVNSmartmeterSensor(SensorEntity):
     async def save_to_home_assistant(self, all_data_by_date):
         """Save consumption data to HA external statistics.
 
-        EVN provides 15-min interval data; HA requires hourly timestamps.
-        We aggregate 4 intervals per hour and use top-of-hour timestamps.
+        Follows enelgrid pattern:
+        1. Clear old statistics
+        2. Build cumulative hourly sums
+        3. Insert via async_add_external_statistics
         """
         statistic_id = "sensor:evn_smartmeter_consumption"
 
-        # Clear old statistics before importing fresh data
+        # Clear consumption statistics before reimport
         recorder = get_instance(self.hass)
         await recorder.async_add_executor_job(
             clear_statistics, recorder, [statistic_id]
         )
+        _LOGGER.debug("Cleared old statistics for %s", statistic_id)
 
         metadata = {
             "has_mean": False,
             "has_sum": True,
-            "mean_type": 0,  # StatisticMeanType.NONE = 0
+            "mean_type": 0,
             "name": "EVN Smart Meter Consumption",
             "source": "sensor",
             "statistic_id": statistic_id,
@@ -142,7 +156,8 @@ class EVNSmartmeterSensor(SensorEntity):
 
         running_sum = 0.0
         for day_date, values in sorted(all_data_by_date.items()):
-            # Aggregate 15-min values into hourly buckets
+            # EVN provides 15-min intervals; HA requires hourly timestamps.
+            # Aggregate 4 intervals per hour.
             hourly_sums = {}
             for idx, value in enumerate(values):
                 if value is not None:
@@ -163,10 +178,21 @@ class EVNSmartmeterSensor(SensorEntity):
                 )
 
             if stats:
-                async_add_external_statistics(self.hass, metadata, stats)
-                _LOGGER.info(
-                    "Saved %d hourly points for %s", len(stats), day_date.isoformat()
-                )
+                try:
+                    async_add_external_statistics(self.hass, metadata, stats)
+                    _LOGGER.info(
+                        "Saved %d hourly points for %s (sum=%.3f kWh)",
+                        len(stats),
+                        day_date.isoformat(),
+                        running_sum,
+                    )
+                except HomeAssistantError as err:
+                    _LOGGER.exception(
+                        "Failed to save statistics for %s: %s",
+                        statistic_id,
+                        err,
+                    )
+                    raise
 
     def _update_monthly(self, all_data_by_date):
         """Update the monthly consumption sensor."""
@@ -208,3 +234,4 @@ class EVNSmartmeterMonthlySensor(SensorEntity):
     def set_total(self, new_total):
         self._state = round(new_total, 3)
         self.async_write_ha_state()
+
