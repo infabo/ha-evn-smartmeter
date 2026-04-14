@@ -32,7 +32,7 @@ from .smartmeter import Smartmeter
 
 _LOGGER = logging.getLogger(__name__)
 
-LOOKBACK_DAYS = 7
+INITIAL_LOOKBACK_DAYS = 365
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -75,42 +75,71 @@ class EVNSmartmeterSensor(SensorEntity):
         return self._state
 
     async def async_update(self):
-        _LOGGER.debug("Starting EVN data fetch (lookback %d days)", LOOKBACK_DAYS)
+        """Fetch EVN data and save to HA statistics.
+
+        First import: fetches up to INITIAL_LOOKBACK_DAYS of history.
+        Subsequent imports: fetches only new data since last known statistic.
+        """
         try:
             self._api = Smartmeter(self._username, self._password)
             await self._api.authenticate()
             await self._api.get_meter_details()
 
-            today = date.today()
-            all_day_data = {}
+            # Determine fetch range (elvia pattern)
+            statistic_id = f"{DOMAIN}:consumption"
+            recorder = get_instance(self.hass)
+            last_stats = await recorder.async_add_executor_job(
+                get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
+            )
 
-            for i in range(LOOKBACK_DAYS, 0, -1):
-                day = today - timedelta(days=i)
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+
+            if not last_stats:
+                start_date = today - timedelta(days=INITIAL_LOOKBACK_DAYS)
+                _LOGGER.info(
+                    "First import: fetching up to %d days from %s",
+                    INITIAL_LOOKBACK_DAYS,
+                    start_date.isoformat(),
+                )
+            else:
+                last_end_ts = last_stats[statistic_id][0]["end"]
+                start_date = dt_util.utc_from_timestamp(last_end_ts).date()
+                _LOGGER.info(
+                    "Incremental import: %d new days from %s",
+                    (today - start_date).days,
+                    start_date.isoformat(),
+                )
+
+            all_day_data = {}
+            current = start_date
+            while current <= yesterday:
                 try:
-                    values = await self._api.get_consumption_per_day(day)
+                    values = await self._api.get_consumption_per_day(current)
                     non_null = (
                         [v for v in values if v is not None] if values else []
                     )
                     if non_null:
-                        all_day_data[day] = values
+                        all_day_data[current] = values
                         _LOGGER.debug(
                             "Day %s: %d non-null values, sum=%.3f kWh",
-                            day.isoformat(),
+                            current.isoformat(),
                             len(non_null),
                             sum(non_null),
                         )
                 except Exception:
-                    _LOGGER.debug("No data for %s", day.isoformat())
+                    _LOGGER.debug("No data for %s", current.isoformat())
+                current += timedelta(days=1)
 
             if all_day_data:
-                await self.save_to_home_assistant(all_day_data)
+                await self.save_to_home_assistant(all_day_data, last_stats)
                 self._update_monthly(all_day_data)
                 self._state = "Imported"
                 _LOGGER.warning(
                     "EVN import complete: %d days imported", len(all_day_data)
                 )
             else:
-                _LOGGER.warning("No consumption data found in lookback window")
+                _LOGGER.warning("No consumption data found")
                 self._state = "No data"
 
         except SmartmeterLoginError:
@@ -126,20 +155,15 @@ class EVNSmartmeterSensor(SensorEntity):
             if self._api:
                 await self._api.close()
 
-    async def save_to_home_assistant(self, all_data_by_date):
+    async def save_to_home_assistant(self, all_data_by_date, last_stats):
         """Save consumption data as external statistics (elvia pattern).
 
-        1. Check for existing statistics to determine cumulative sum baseline
+        1. Use pre-fetched last_stats to determine cumulative sum baseline
         2. Aggregate 15-min EVN intervals into hourly buckets
         3. Build one list of StatisticData, call async_add_external_statistics once
         """
         statistic_id = f"{DOMAIN}:consumption"
         recorder = get_instance(self.hass)
-
-        # Determine cumulative sum baseline (elvia pattern)
-        last_stats = await recorder.async_add_executor_job(
-            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
-        )
 
         earliest_day = min(all_data_by_date.keys())
         window_start = dt_util.as_utc(
