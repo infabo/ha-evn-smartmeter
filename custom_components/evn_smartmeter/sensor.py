@@ -43,6 +43,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     async_add_entities([consumption_sensor, monthly_sensor])
 
+    # Store sensor reference so the reset service can call async_update
+    hass.data[f"{DOMAIN}_sensor"] = consumption_sensor
+
     # Immediately fetch data on startup / reload
     hass.async_create_task(consumption_sensor.async_update())
 
@@ -108,9 +111,18 @@ class EVNSmartmeterSensor(SensorEntity):
             # Determine fetch range (elvia pattern)
             statistic_id = f"{DOMAIN}:consumption"
             recorder = get_instance(self.hass)
-            last_stats = await recorder.async_add_executor_job(
-                get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
+
+            force_reimport = self.hass.data.pop(
+                f"{DOMAIN}_force_reimport", False
             )
+
+            if force_reimport:
+                last_stats = None
+                _LOGGER.warning("Force reimport — ignoring existing stats")
+            else:
+                last_stats = await recorder.async_add_executor_job(
+                    get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
+                )
 
             today = date.today()
             yesterday = today - timedelta(days=1)

@@ -1,0 +1,3 @@
+reset_statistics:
+  name: Reset Statistics
+  description: Reset all EVN Smart Meter statistics and reimport the complete history from the portal.
