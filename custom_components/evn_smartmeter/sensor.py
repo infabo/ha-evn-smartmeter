@@ -32,9 +32,6 @@ from .smartmeter import Smartmeter
 
 _LOGGER = logging.getLogger(__name__)
 
-INITIAL_LOOKBACK_DAYS = 365
-
-
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up EVN Smart Meter sensors from a config entry."""
     consumption_sensor = EVNSmartmeterSensor(hass, entry)
@@ -74,10 +71,33 @@ class EVNSmartmeterSensor(SensorEntity):
     def state(self):
         return self._state
 
+    async def _fetch_days(self, start, end):
+        """Fetch consumption data for a date range (day by day)."""
+        data = {}
+        current = start
+        while current <= end:
+            try:
+                values = await self._api.get_consumption_per_day(current)
+                non_null = (
+                    [v for v in values if v is not None] if values else []
+                )
+                if non_null:
+                    data[current] = values
+                    _LOGGER.debug(
+                        "Day %s: %d non-null values, sum=%.3f kWh",
+                        current.isoformat(),
+                        len(non_null),
+                        sum(non_null),
+                    )
+            except Exception:
+                _LOGGER.debug("No data for %s", current.isoformat())
+            current += timedelta(days=1)
+        return data
+
     async def async_update(self):
         """Fetch EVN data and save to HA statistics.
 
-        First import: fetches up to INITIAL_LOOKBACK_DAYS of history.
+        First import: walks backwards month by month until no data is found.
         Subsequent imports: fetches only new data since last known statistic.
         """
         try:
@@ -96,13 +116,40 @@ class EVNSmartmeterSensor(SensorEntity):
             yesterday = today - timedelta(days=1)
 
             if not last_stats:
-                start_date = today - timedelta(days=INITIAL_LOOKBACK_DAYS)
-                _LOGGER.info(
-                    "First import: fetching up to %d days from %s",
-                    INITIAL_LOOKBACK_DAYS,
-                    start_date.isoformat(),
-                )
+                # First import: go back month by month until a full month
+                # returns no data (= we've reached the beginning of history)
+                _LOGGER.info("First import: fetching all available history")
+                all_day_data = {}
+                month_start = yesterday.replace(day=1)
+
+                while True:
+                    month_last = (
+                        (month_start.replace(day=28) + timedelta(days=4))
+                        .replace(day=1)
+                        - timedelta(days=1)
+                    )
+                    month_end = min(month_last, yesterday)
+                    month_data = await self._fetch_days(month_start, month_end)
+
+                    if not month_data:
+                        _LOGGER.info(
+                            "No data for %s — history complete",
+                            month_start.strftime("%Y-%m"),
+                        )
+                        break
+
+                    all_day_data.update(month_data)
+                    _LOGGER.info(
+                        "Fetched %d days for %s",
+                        len(month_data),
+                        month_start.strftime("%Y-%m"),
+                    )
+                    # Previous month
+                    month_start = (
+                        month_start - timedelta(days=1)
+                    ).replace(day=1)
             else:
+                # Incremental: fetch from last known stat to yesterday
                 last_end_ts = last_stats[statistic_id][0]["end"]
                 start_date = dt_util.utc_from_timestamp(last_end_ts).date()
                 _LOGGER.info(
@@ -110,26 +157,7 @@ class EVNSmartmeterSensor(SensorEntity):
                     (today - start_date).days,
                     start_date.isoformat(),
                 )
-
-            all_day_data = {}
-            current = start_date
-            while current <= yesterday:
-                try:
-                    values = await self._api.get_consumption_per_day(current)
-                    non_null = (
-                        [v for v in values if v is not None] if values else []
-                    )
-                    if non_null:
-                        all_day_data[current] = values
-                        _LOGGER.debug(
-                            "Day %s: %d non-null values, sum=%.3f kWh",
-                            current.isoformat(),
-                            len(non_null),
-                            sum(non_null),
-                        )
-                except Exception:
-                    _LOGGER.debug("No data for %s", current.isoformat())
-                current += timedelta(days=1)
+                all_day_data = await self._fetch_days(start_date, yesterday)
 
             if all_day_data:
                 await self.save_to_home_assistant(all_day_data, last_stats)
