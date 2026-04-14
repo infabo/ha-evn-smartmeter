@@ -13,6 +13,7 @@ from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
 )
+from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import HomeAssistantError
@@ -135,9 +136,8 @@ class EVNSmartmeterSensor(SensorEntity):
         statistic_id = "evn_smartmeter:consumption"
 
         metadata = {
-            "has_mean": False,
             "has_sum": True,
-            "mean_type": 0,
+            "mean_type": StatisticMeanType.NONE,
             "name": "EVN Smart Meter Consumption",
             "source": "evn_smartmeter",
             "statistic_id": statistic_id,
