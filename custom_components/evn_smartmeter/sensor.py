@@ -1,24 +1,30 @@
 """Sensor platform for EVN Smart Meter integration.
 
-Architecture matches enelgrid (github.com/sathia-musso/enelgrid):
-- One import sensor that fetches data and saves to external statistics
-- One monthly sensor showing cumulative kWh for the current month
-- All consumption data lives in HA external statistics
+Imports consumption data from the EVN/Netz NÖ Smart Meter portal as
+external statistics, following the pattern used by the official elvia
+integration (homeassistant/components/elvia/importer.py).
 """
 
 import logging
 from datetime import date, datetime, timedelta
+from typing import cast
 
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
-from homeassistant.components.recorder.models import StatisticMeanType
+from homeassistant.components.recorder.util import get_instance
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_time_change
-from homeassistant.util.dt import as_utc
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .errors import SmartmeterConnectionError, SmartmeterLoginError
@@ -40,18 +46,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     async_add_entities([consumption_sensor, monthly_sensor])
 
-    _LOGGER.warning(
-        "EVN Smart Meter sensors added: %s, %s",
-        consumption_sensor.entity_id,
-        monthly_sensor.entity_id,
-    )
-
     # Immediately fetch data on startup / reload
     hass.async_create_task(consumption_sensor.async_update())
 
     # Schedule daily fetch at 06:00
     async def scheduled_update(_now):
-        _LOGGER.debug("Daily scheduled update triggered at 06:00")
         await consumption_sensor.async_update()
 
     async_track_time_change(hass, scheduled_update, hour=6, minute=0, second=0)
@@ -128,62 +127,88 @@ class EVNSmartmeterSensor(SensorEntity):
                 await self._api.close()
 
     async def save_to_home_assistant(self, all_data_by_date):
-        """Save consumption data to HA external statistics.
+        """Save consumption data as external statistics (elvia pattern).
 
-        Aggregates 15-min EVN intervals into hourly buckets,
-        builds a cumulative sum, and upserts via async_add_external_statistics.
+        1. Check for existing statistics to determine cumulative sum baseline
+        2. Aggregate 15-min EVN intervals into hourly buckets
+        3. Build one list of StatisticData, call async_add_external_statistics once
         """
-        statistic_id = "evn_smartmeter:consumption"
+        statistic_id = f"{DOMAIN}:consumption"
+        recorder = get_instance(self.hass)
 
-        metadata = {
-            "has_sum": True,
-            "mean_type": StatisticMeanType.NONE,
-            "name": "EVN Smart Meter Consumption",
-            "source": "evn_smartmeter",
-            "statistic_id": statistic_id,
-            "unit_class": "energy",
-            "unit_of_measurement": "kWh",
-        }
+        # Determine cumulative sum baseline (elvia pattern)
+        last_stats = await recorder.async_add_executor_job(
+            get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
+        )
 
-        running_sum = 0.0
+        earliest_day = min(all_data_by_date.keys())
+        window_start = dt_util.as_utc(
+            datetime.combine(earliest_day, datetime.min.time())
+        )
+
+        if not last_stats:
+            _sum = 0.0
+            _LOGGER.debug("First import, starting sum at 0.0")
+        else:
+            # Find the cumulative sum just before our lookback window
+            curr_stat = await recorder.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                window_start - timedelta(hours=1),
+                window_start,
+                {statistic_id},
+                "hour",
+                None,
+                {"sum"},
+            )
+            if curr_stat and statistic_id in curr_stat and curr_stat[statistic_id]:
+                _sum = cast(float, curr_stat[statistic_id][-1]["sum"])
+                _LOGGER.debug("Resuming sum from %.3f kWh", _sum)
+            else:
+                _sum = 0.0
+                _LOGGER.debug("No stats before window, starting sum at 0.0")
+
+        # Build all statistics in one list
+        statistics: list[StatisticData] = []
         for day_date, values in sorted(all_data_by_date.items()):
-            # EVN provides 15-min intervals; HA requires hourly timestamps.
-            # Aggregate 4 intervals per hour.
-            hourly_sums = {}
+            # EVN provides 15-min intervals; HA requires hourly timestamps
+            hourly_sums: dict[int, float] = {}
             for idx, value in enumerate(values):
                 if value is not None:
                     hour = idx // 4
                     hourly_sums[hour] = hourly_sums.get(hour, 0.0) + value
 
-            stats = []
             for hour in sorted(hourly_sums):
-                running_sum += hourly_sums[hour]
-                ts = datetime.combine(
-                    day_date, datetime.min.time()
-                ) + timedelta(hours=hour)
-                stats.append(
-                    {
-                        "start": as_utc(ts),
-                        "sum": running_sum,
-                    }
+                _sum += hourly_sums[hour]
+                ts = dt_util.as_utc(
+                    datetime.combine(day_date, datetime.min.time())
+                    + timedelta(hours=hour)
                 )
+                statistics.append(StatisticData(start=ts, sum=_sum))
 
-            if stats:
-                try:
-                    async_add_external_statistics(self.hass, metadata, stats)
-                    _LOGGER.info(
-                        "Saved %d hourly points for %s (sum=%.3f kWh)",
-                        len(stats),
-                        day_date.isoformat(),
-                        running_sum,
-                    )
-                except HomeAssistantError as err:
-                    _LOGGER.exception(
-                        "Failed to save statistics for %s: %s",
-                        statistic_id,
-                        err,
-                    )
-                    raise
+        if statistics:
+            try:
+                async_add_external_statistics(
+                    self.hass,
+                    StatisticMetaData(
+                        mean_type=StatisticMeanType.NONE,
+                        has_sum=True,
+                        name="EVN Smart Meter Consumption",
+                        source=DOMAIN,
+                        statistic_id=statistic_id,
+                        unit_class="energy",
+                        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+                    ),
+                    statistics,
+                )
+                _LOGGER.info(
+                    "Imported %d hourly statistics (sum=%.3f kWh)",
+                    len(statistics),
+                    _sum,
+                )
+            except HomeAssistantError as err:
+                _LOGGER.exception("Failed to save statistics: %s", err)
+                raise
 
     def _update_monthly(self, all_data_by_date):
         """Update the monthly consumption sensor."""
