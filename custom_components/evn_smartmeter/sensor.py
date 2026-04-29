@@ -6,7 +6,8 @@ integration (homeassistant/components/elvia/importer.py).
 """
 
 import logging
-from datetime import date, datetime, timedelta
+import random
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import cast
 
 from homeassistant.components.recorder.models import (
@@ -23,10 +24,16 @@ from homeassistant.components.recorder.util import get_instance
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_FETCH_HOUR_START,
+    CONF_FETCH_HOUR_END,
+    DEFAULT_FETCH_HOUR_START,
+    DEFAULT_FETCH_HOUR_END,
+)
 from .errors import SmartmeterConnectionError, SmartmeterLoginError
 from .smartmeter import Smartmeter
 
@@ -49,11 +56,42 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Immediately fetch data on startup / reload
     hass.async_create_task(consumption_sensor.async_update())
 
-    # Schedule daily fetch at 06:00
-    async def scheduled_update(_now):
-        await consumption_sensor.async_update()
+    # Schedule daily fetch at a random time within the configured window
+    _schedule_next_fetch(hass, entry, consumption_sensor)
 
-    async_track_time_change(hass, scheduled_update, hour=6, minute=0, second=0)
+
+def _schedule_next_fetch(hass, entry, consumption_sensor):
+    """Schedule the next fetch at a random time within [fetch_hour_start, fetch_hour_end)."""
+    hour_start = int(entry.options.get(CONF_FETCH_HOUR_START, DEFAULT_FETCH_HOUR_START))
+    hour_end = int(entry.options.get(CONF_FETCH_HOUR_END, DEFAULT_FETCH_HOUR_END))
+
+    if hour_end > hour_start:
+        offset_minutes = random.randint(0, (hour_end - hour_start) * 60 - 1)
+    else:
+        offset_minutes = 0
+
+    fetch_hour = hour_start + offset_minutes // 60
+    fetch_minute = offset_minutes % 60
+
+    now = dt_util.now()
+    fetch_dt = dt_util.as_local(
+        datetime.combine(now.date(), dt_time(hour=fetch_hour, minute=fetch_minute))
+    )
+    if fetch_dt <= now:
+        fetch_dt = dt_util.as_local(
+            datetime.combine(
+                now.date() + timedelta(days=1),
+                dt_time(hour=fetch_hour, minute=fetch_minute),
+            )
+        )
+
+    async def _run(_now):
+        await consumption_sensor.async_update()
+        _schedule_next_fetch(hass, entry, consumption_sensor)
+
+    unsub = async_track_point_in_time(hass, _run, fetch_dt)
+    entry.async_on_unload(unsub)
+    _LOGGER.debug("Next EVN fetch scheduled at %s", fetch_dt.isoformat())
 
 
 class EVNSmartmeterSensor(SensorEntity):

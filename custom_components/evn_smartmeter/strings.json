@@ -18,5 +18,20 @@
     "abort": {
       "already_configured": "This account is already configured"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Fetch Time Window",
+        "description": "The daily data fetch will occur at a random time within the specified window.",
+        "data": {
+          "fetch_hour_start": "Earliest hour",
+          "fetch_hour_end": "Latest hour"
+        }
+      }
+    },
+    "error": {
+      "invalid_range": "Earliest hour must be less than latest hour"
+    }
   }
 }
