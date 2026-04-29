@@ -86,12 +86,48 @@ def _schedule_next_fetch(hass, entry, consumption_sensor):
         )
 
     async def _run(_now):
-        await consumption_sensor.async_update()
-        _schedule_next_fetch(hass, entry, consumption_sensor)
+        success = await consumption_sensor.async_update()
+        if not success:
+            _schedule_retry(hass, entry, consumption_sensor, attempt=1)
+        else:
+            _schedule_next_fetch(hass, entry, consumption_sensor)
 
     unsub = async_track_point_in_time(hass, _run, fetch_dt)
     entry.async_on_unload(unsub)
     _LOGGER.debug("Next EVN fetch scheduled at %s", fetch_dt.isoformat())
+
+
+_MAX_RETRIES = 2
+_RETRY_DELAY_MINUTES = 30
+
+
+def _schedule_retry(hass, entry, consumption_sensor, attempt: int):
+    """Retry a failed fetch up to _MAX_RETRIES times, _RETRY_DELAY_MINUTES apart."""
+    if attempt > _MAX_RETRIES:
+        _LOGGER.warning(
+            "EVN fetch failed after %d retries; giving up until next scheduled run",
+            _MAX_RETRIES,
+        )
+        _schedule_next_fetch(hass, entry, consumption_sensor)
+        return
+
+    retry_at = dt_util.now() + timedelta(minutes=_RETRY_DELAY_MINUTES)
+    _LOGGER.warning(
+        "EVN connection error; scheduling retry %d/%d at %s",
+        attempt,
+        _MAX_RETRIES,
+        retry_at.strftime("%H:%M"),
+    )
+
+    async def _run(_now):
+        success = await consumption_sensor.async_update()
+        if not success:
+            _schedule_retry(hass, entry, consumption_sensor, attempt + 1)
+        else:
+            _schedule_next_fetch(hass, entry, consumption_sensor)
+
+    unsub = async_track_point_in_time(hass, _run, retry_at)
+    entry.async_on_unload(unsub)
 
 
 class EVNSmartmeterSensor(SensorEntity):
@@ -135,8 +171,11 @@ class EVNSmartmeterSensor(SensorEntity):
             current += timedelta(days=1)
         return data
 
-    async def async_update(self):
+    async def async_update(self) -> bool:
         """Fetch EVN data and save to HA statistics.
+
+        Returns True when the run completed (success or permanent error that
+        should not be retried), False on transient connection errors.
 
         First import: walks backwards month by month until no data is found.
         Subsequent imports: fetches only new data since last known statistic.
@@ -220,15 +259,20 @@ class EVNSmartmeterSensor(SensorEntity):
                 _LOGGER.warning("No consumption data found")
                 self._state = "No data"
 
+            return True
+
         except SmartmeterLoginError:
             _LOGGER.error("EVN login failed, check credentials")
             self._state = "Login error"
+            return True  # permanent error — do not retry
         except SmartmeterConnectionError as err:
             _LOGGER.warning("Connection error: %s", err)
             self._state = "Connection error"
+            return False  # transient — caller may retry
         except Exception as err:
             _LOGGER.exception("Failed to update EVN data: %s", err)
             self._state = "Error"
+            return True  # unknown — do not retry
         finally:
             if self._api:
                 await self._api.close()

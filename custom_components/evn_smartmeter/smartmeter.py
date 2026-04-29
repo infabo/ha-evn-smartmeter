@@ -60,24 +60,47 @@ class Smartmeter:
         session = await asyncio.to_thread(httpx.AsyncClient, timeout=30.0)
         auth_data = {"user": self._username, "pwd": self._password}
 
-        try:
-            response = await session.post(self.AUTH_URL, data=auth_data)
-        except httpx.RequestError as err:
+        _AUTH_RETRY_DELAYS = (0, 5, 15)  # seconds before each attempt
+        for attempt, delay in enumerate(_AUTH_RETRY_DELAYS, start=1):
+            if delay:
+                _LOGGER.warning(
+                    "Auth attempt %d/%d: retrying in %ds",
+                    attempt, len(_AUTH_RETRY_DELAYS), delay,
+                )
+                await asyncio.sleep(delay)
+
+            try:
+                response = await session.post(self.AUTH_URL, data=auth_data)
+            except httpx.RequestError as err:
+                await session.aclose()
+                raise SmartmeterConnectionError(
+                    f"Connection to Smart Meter portal failed: {err}"
+                ) from err
+
+            if response.status_code == 200:
+                _LOGGER.debug("Authentication successful (attempt %d)", attempt)
+                self._session = session
+                return True
+
+            if response.status_code == 401:
+                await session.aclose()
+                raise SmartmeterLoginError("Login failed. Check username/password.")
+
+            if response.status_code >= 500 and attempt < len(_AUTH_RETRY_DELAYS):
+                _LOGGER.warning(
+                    "Server error %d during authentication (attempt %d/%d)",
+                    response.status_code, attempt, len(_AUTH_RETRY_DELAYS),
+                )
+                continue
+
             await session.aclose()
             raise SmartmeterConnectionError(
-                f"Connection to Smart Meter portal failed: {err}"
-            ) from err
-
-        if response.status_code == 200:
-            _LOGGER.debug("Authentication successful")
-            self._session = session
-            return True
+                f"Authentication failed with status {response.status_code}"
+            )
 
         await session.aclose()
-        if response.status_code == 401:
-            raise SmartmeterLoginError("Login failed. Check username/password.")
         raise SmartmeterConnectionError(
-            f"Authentication failed with status {response.status_code}"
+            f"Authentication failed after {len(_AUTH_RETRY_DELAYS)} attempts"
         )
 
     async def close(self) -> None:
