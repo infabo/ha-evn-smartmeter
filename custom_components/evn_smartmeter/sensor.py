@@ -39,6 +39,9 @@ from .smartmeter import Smartmeter
 
 _LOGGER = logging.getLogger(__name__)
 
+_EPOCH = dt_util.utc_from_timestamp(0)
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up EVN Smart Meter sensors from a config entry."""
     consumption_sensor = EVNSmartmeterSensor(hass, entry)
@@ -278,7 +281,9 @@ class EVNSmartmeterSensor(SensorEntity):
                 all_day_data = await self._fetch_days(start_date, yesterday)
 
             if all_day_data:
-                await self.save_to_home_assistant(all_day_data, last_stats)
+                await self.save_to_home_assistant(
+                    all_day_data, last_stats, clear_existing=force_reimport
+                )
                 self._update_monthly(all_day_data)
                 self._set_status("Imported")
                 _LOGGER.warning(
@@ -306,12 +311,45 @@ class EVNSmartmeterSensor(SensorEntity):
             if self._api:
                 await self._api.close()
 
-    async def save_to_home_assistant(self, all_data_by_date, last_stats):
+    async def _get_sum_before(self, statistic_id: str, before: datetime) -> float:
+        """Return the cumulative sum of the last statistic strictly before `before`.
+
+        Checks the two preceding days first (the common case), then falls
+        back to the whole history so that a gap of any length between the
+        last stored hour and the import window cannot reset the sum to 0.
+        """
+        recorder = get_instance(self.hass)
+        for start, period in (
+            (before - timedelta(days=2), "hour"),
+            (_EPOCH, "month"),
+        ):
+            stats = await recorder.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start,
+                before,
+                {statistic_id},
+                period,
+                None,
+                {"sum"},
+            )
+            rows = stats.get(statistic_id) if stats else None
+            if rows and rows[-1].get("sum") is not None:
+                return cast(float, rows[-1]["sum"])
+        return 0.0
+
+    async def save_to_home_assistant(
+        self, all_data_by_date, last_stats, clear_existing: bool = False
+    ):
         """Save consumption data as external statistics (elvia pattern).
 
-        1. Use pre-fetched last_stats to determine cumulative sum baseline
+        1. Determine the cumulative sum baseline from the last statistic
+           before the import window (or 0 on a fresh import)
         2. Aggregate 15-min EVN intervals into hourly buckets
         3. Build one list of StatisticData, call async_add_external_statistics once
+
+        With clear_existing=True the stored statistic is dropped first so a
+        forced reimport cannot leave stale rows with a higher sum behind.
         """
         statistic_id = f"{DOMAIN}:consumption"
         recorder = get_instance(self.hass)
@@ -321,27 +359,16 @@ class EVNSmartmeterSensor(SensorEntity):
             datetime.combine(earliest_day, datetime.min.time())
         )
 
+        if clear_existing:
+            _LOGGER.warning("Clearing existing statistics for %s", statistic_id)
+            recorder.async_clear_statistics([statistic_id])
+
         if not last_stats:
             _sum = 0.0
             _LOGGER.debug("First import, starting sum at 0.0")
         else:
-            # Find the cumulative sum just before our lookback window
-            curr_stat = await recorder.async_add_executor_job(
-                statistics_during_period,
-                self.hass,
-                window_start - timedelta(hours=1),
-                window_start,
-                {statistic_id},
-                "hour",
-                None,
-                {"sum"},
-            )
-            if curr_stat and statistic_id in curr_stat and curr_stat[statistic_id]:
-                _sum = cast(float, curr_stat[statistic_id][-1]["sum"])
-                _LOGGER.debug("Resuming sum from %.3f kWh", _sum)
-            else:
-                _sum = 0.0
-                _LOGGER.debug("No stats before window, starting sum at 0.0")
+            _sum = await self._get_sum_before(statistic_id, window_start)
+            _LOGGER.debug("Resuming sum from %.3f kWh", _sum)
 
         # Build all statistics in one list
         statistics: list[StatisticData] = []
