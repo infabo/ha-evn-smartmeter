@@ -97,6 +97,13 @@ def _schedule_next_fetch(hass, entry, consumption_sensor):
 _MAX_RETRIES = 2
 _RETRY_DELAY_MINUTES = 30
 
+# First import: stop walking back after this many consecutive months without
+# any data. A single empty month (portal outage, meter swap, or the current
+# month not yet published) must not end the history search.
+_EMPTY_MONTHS_TO_STOP = 3
+# Hard upper bound for the first import, in months.
+_MAX_HISTORY_MONTHS = 60
+
 
 def _schedule_retry(hass, entry, consumption_sensor, attempt: int):
     """Retry a failed fetch up to _MAX_RETRIES times, _RETRY_DELAY_MINUTES apart."""
@@ -212,13 +219,17 @@ class EVNSmartmeterSensor(SensorEntity):
             yesterday = today - timedelta(days=1)
 
             if not last_stats:
-                # First import: go back month by month until a full month
-                # returns no data (= we've reached the beginning of history)
+                # First import: go back month by month. The search ends after
+                # _EMPTY_MONTHS_TO_STOP consecutive months without data or at
+                # _MAX_HISTORY_MONTHS, so a single empty month (e.g. the
+                # current month before the portal publishes it) does not cut
+                # off the history.
                 _LOGGER.info("First import: fetching all available history")
                 all_day_data = {}
                 month_start = yesterday.replace(day=1)
+                empty_months = 0
 
-                while True:
+                for _ in range(_MAX_HISTORY_MONTHS):
                     month_last = (
                         (month_start.replace(day=28) + timedelta(days=4))
                         .replace(day=1)
@@ -227,23 +238,34 @@ class EVNSmartmeterSensor(SensorEntity):
                     month_end = min(month_last, yesterday)
                     month_data = await self._fetch_days(month_start, month_end)
 
-                    if not month_data:
+                    if month_data:
+                        empty_months = 0
+                        all_day_data.update(month_data)
                         _LOGGER.info(
-                            "No data for %s — history complete",
+                            "Fetched %d days for %s",
+                            len(month_data),
                             month_start.strftime("%Y-%m"),
                         )
-                        break
+                    else:
+                        empty_months += 1
+                        _LOGGER.info(
+                            "No data for %s (%d/%d empty months)",
+                            month_start.strftime("%Y-%m"),
+                            empty_months,
+                            _EMPTY_MONTHS_TO_STOP,
+                        )
+                        if empty_months >= _EMPTY_MONTHS_TO_STOP:
+                            _LOGGER.info("History complete")
+                            break
 
-                    all_day_data.update(month_data)
-                    _LOGGER.info(
-                        "Fetched %d days for %s",
-                        len(month_data),
-                        month_start.strftime("%Y-%m"),
-                    )
                     # Previous month
                     month_start = (
                         month_start - timedelta(days=1)
                     ).replace(day=1)
+                else:
+                    _LOGGER.info(
+                        "Reached history limit of %d months", _MAX_HISTORY_MONTHS
+                    )
             else:
                 # Incremental: fetch from last known stat to yesterday
                 last_end_ts = last_stats[statistic_id][0]["end"]
