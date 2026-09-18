@@ -27,10 +27,12 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
 
+from . import EVNRuntimeData
 from .const import (
     DOMAIN,
     CONF_FETCH_HOUR_START,
     CONF_FETCH_HOUR_END,
+    CONF_STATISTIC_ID,
     DEFAULT_FETCH_HOUR_START,
     DEFAULT_FETCH_HOUR_END,
 )
@@ -50,16 +52,14 @@ def _local_day_start_utc(day: date) -> datetime:
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up EVN Smart Meter sensors from a config entry."""
     consumption_sensor = EVNSmartmeterSensor(hass, entry)
-    monthly_sensor = EVNSmartmeterMonthlySensor()
+    monthly_sensor = EVNSmartmeterMonthlySensor(entry)
 
-    hass.data.setdefault("evn_smartmeter_monthly_sensor", {})[
-        entry.entry_id
-    ] = monthly_sensor
+    # Shared with the reset service and the import sensor
+    entry.runtime_data = EVNRuntimeData(
+        import_sensor=consumption_sensor, monthly_sensor=monthly_sensor
+    )
 
     async_add_entities([consumption_sensor, monthly_sensor])
-
-    # Store sensor reference so the reset service can call async_update
-    hass.data[f"{DOMAIN}_sensor"] = consumption_sensor
 
     # Schedule daily fetch at a random time within the configured window
     _schedule_next_fetch(hass, entry, consumption_sensor)
@@ -153,9 +153,13 @@ class EVNSmartmeterSensor(SensorEntity):
         self.entry_id = entry.entry_id
         self._username = entry.data[CONF_USERNAME]
         self._password = entry.data[CONF_PASSWORD]
+        self._statistic_id = entry.data[CONF_STATISTIC_ID]
         self._attr_name = "EVN Smart Meter Import"
+        self._attr_unique_id = f"{entry.entry_id}_import"
         self._attr_native_value = None
         self._api = None
+        # Set by the reset_statistics service before calling async_update()
+        self.force_reimport = False
 
     async def async_added_to_hass(self) -> None:
         """Start the first import once the entity is registered."""
@@ -199,8 +203,9 @@ class EVNSmartmeterSensor(SensorEntity):
         Returns True when the run completed (success or permanent error that
         should not be retried), False on transient connection errors.
 
-        First import: walks backwards month by month until no data is found.
-        Subsequent imports: fetches only new data since last known statistic.
+        First import: walks backwards month by month until several
+        consecutive months are empty. Subsequent imports: re-fetch from the
+        day of the last known statistic up to yesterday.
         """
         try:
             self._api = Smartmeter(self._username, self._password)
@@ -208,12 +213,11 @@ class EVNSmartmeterSensor(SensorEntity):
             await self._api.get_meter_details()
 
             # Determine fetch range (elvia pattern)
-            statistic_id = f"{DOMAIN}:consumption"
+            statistic_id = self._statistic_id
             recorder = get_instance(self.hass)
 
-            force_reimport = self.hass.data.pop(
-                f"{DOMAIN}_force_reimport", False
-            )
+            force_reimport = self.force_reimport
+            self.force_reimport = False
 
             if force_reimport:
                 last_stats = None
@@ -362,7 +366,7 @@ class EVNSmartmeterSensor(SensorEntity):
         With clear_existing=True the stored statistic is dropped first so a
         forced reimport cannot leave stale rows with a higher sum behind.
         """
-        statistic_id = f"{DOMAIN}:consumption"
+        statistic_id = self._statistic_id
         recorder = get_instance(self.hass)
 
         earliest_day = min(all_data_by_date.keys())
@@ -406,7 +410,7 @@ class EVNSmartmeterSensor(SensorEntity):
                     StatisticMetaData(
                         mean_type=StatisticMeanType.NONE,
                         has_sum=True,
-                        name="EVN Smart Meter Consumption",
+                        name=f"EVN Smart Meter Consumption ({self._username})",
                         source=DOMAIN,
                         statistic_id=statistic_id,
                         unit_class="energy",
@@ -430,14 +434,10 @@ class EVNSmartmeterSensor(SensorEntity):
         start. Reading from the recorder instead of the last fetch makes the
         value independent of how many days the run imported.
         """
-        monthly_sensor = self.hass.data.get(
-            "evn_smartmeter_monthly_sensor", {}
-        ).get(self.entry_id)
-        if not monthly_sensor:
-            return
+        monthly_sensor = self.entry.runtime_data.monthly_sensor
 
         try:
-            statistic_id = f"{DOMAIN}:consumption"
+            statistic_id = self._statistic_id
             recorder = get_instance(self.hass)
             # Statistics queued by this run must be committed before reading.
             await recorder.async_block_till_done()
@@ -466,8 +466,11 @@ class EVNSmartmeterSensor(SensorEntity):
 class EVNSmartmeterMonthlySensor(SensorEntity):
     """Monthly cumulative total sensor."""
 
-    def __init__(self):
+    def __init__(self, entry):
+        # Kept as the suggested object id so existing installations keep
+        # their entity id; the registry appends a suffix for further accounts.
         self.entity_id = "sensor.evn_smartmeter_monthly_consumption"
+        self._attr_unique_id = f"{entry.entry_id}_monthly"
         self._attr_name = "EVN Smart Meter Monthly Consumption"
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_state_class = "total_increasing"

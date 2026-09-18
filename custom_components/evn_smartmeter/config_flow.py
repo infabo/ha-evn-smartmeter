@@ -16,6 +16,7 @@ from homeassistant.helpers.selector import (
     NumberSelectorMode,
 )
 
+from . import statistic_id_for_username
 from .smartmeter import Smartmeter
 from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
@@ -23,8 +24,10 @@ from .const import (
     DOMAIN,
     CONF_FETCH_HOUR_START,
     CONF_FETCH_HOUR_END,
+    CONF_STATISTIC_ID,
     DEFAULT_FETCH_HOUR_START,
     DEFAULT_FETCH_HOUR_END,
+    LEGACY_STATISTIC_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,7 +47,7 @@ _HOUR_SELECTOR = NumberSelector(
 class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for EVN Smart Meter."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback
@@ -68,9 +71,19 @@ class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
             # Validate credentials
             error = await self._test_credentials(username, password)
             if error is None:
+                # The first account keeps the legacy statistic id so existing
+                # Energy Dashboard setups keep working; further accounts get
+                # their own id derived from the username.
+                taken = {
+                    e.data.get(CONF_STATISTIC_ID)
+                    for e in self._async_current_entries()
+                }
+                statistic_id = LEGACY_STATISTIC_ID
+                if statistic_id in taken:
+                    statistic_id = statistic_id_for_username(username)
                 return self.async_create_entry(
                     title=f"EVN Smart Meter ({username})",
-                    data=user_input,
+                    data={**user_input, CONF_STATISTIC_ID: statistic_id},
                 )
             errors["base"] = error
 
