@@ -42,6 +42,11 @@ _LOGGER = logging.getLogger(__name__)
 _EPOCH = dt_util.utc_from_timestamp(0)
 
 
+def _local_day_start_utc(day: date) -> datetime:
+    """Return local midnight of `day` (HA time zone) as a UTC datetime."""
+    return dt_util.as_utc(dt_util.start_of_local_day(day))
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up EVN Smart Meter sensors from a config entry."""
     consumption_sensor = EVNSmartmeterSensor(hass, entry)
@@ -218,7 +223,7 @@ class EVNSmartmeterSensor(SensorEntity):
                     get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
                 )
 
-            today = date.today()
+            today = dt_util.now().date()
             yesterday = today - timedelta(days=1)
 
             if not last_stats:
@@ -270,9 +275,12 @@ class EVNSmartmeterSensor(SensorEntity):
                         "Reached history limit of %d months", _MAX_HISTORY_MONTHS
                     )
             else:
-                # Incremental: fetch from last known stat to yesterday
-                last_end_ts = last_stats[statistic_id][0]["end"]
-                start_date = dt_util.utc_from_timestamp(last_end_ts).date()
+                # Incremental: re-fetch the local day of the last known stat
+                # (its values may still have been partial) up to yesterday
+                last_start_ts = last_stats[statistic_id][0]["start"]
+                start_date = dt_util.as_local(
+                    dt_util.utc_from_timestamp(last_start_ts)
+                ).date()
                 _LOGGER.info(
                     "Incremental import: %d new days from %s",
                     (today - start_date).days,
@@ -355,9 +363,7 @@ class EVNSmartmeterSensor(SensorEntity):
         recorder = get_instance(self.hass)
 
         earliest_day = min(all_data_by_date.keys())
-        window_start = dt_util.as_utc(
-            datetime.combine(earliest_day, datetime.min.time())
-        )
+        window_start = _local_day_start_utc(earliest_day)
 
         if clear_existing:
             _LOGGER.warning("Clearing existing statistics for %s", statistic_id)
@@ -373,7 +379,12 @@ class EVNSmartmeterSensor(SensorEntity):
         # Build all statistics in one list
         statistics: list[StatisticData] = []
         for day_date, values in sorted(all_data_by_date.items()):
-            # EVN provides 15-min intervals; HA requires hourly timestamps
+            # EVN provides 15-min intervals; HA requires hourly timestamps.
+            # Bucket by elapsed hours since local midnight and add them to
+            # the UTC day start. On DST days the portal delivers 92 or 100
+            # intervals; counting elapsed time keeps every hour unique and
+            # avoids the non-existent / ambiguous local wall-clock hours.
+            day_start = _local_day_start_utc(day_date)
             hourly_sums: dict[int, float] = {}
             for idx, value in enumerate(values):
                 if value is not None:
@@ -382,10 +393,7 @@ class EVNSmartmeterSensor(SensorEntity):
 
             for hour in sorted(hourly_sums):
                 _sum += hourly_sums[hour]
-                ts = dt_util.as_utc(
-                    datetime.combine(day_date, datetime.min.time())
-                    + timedelta(hours=hour)
-                )
+                ts = day_start + timedelta(hours=hour)
                 statistics.append(StatisticData(start=ts, sum=_sum))
 
         if statistics:
@@ -421,7 +429,7 @@ class EVNSmartmeterSensor(SensorEntity):
             if not monthly_sensor:
                 return
 
-            today = date.today()
+            today = dt_util.now().date()
             total_kwh = sum(
                 sum(v for v in values if v is not None)
                 for day, values in all_data_by_date.items()
