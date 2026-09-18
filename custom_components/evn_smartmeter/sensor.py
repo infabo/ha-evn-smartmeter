@@ -53,9 +53,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Store sensor reference so the reset service can call async_update
     hass.data[f"{DOMAIN}_sensor"] = consumption_sensor
 
-    # Immediately fetch data on startup / reload
-    hass.async_create_task(consumption_sensor.async_update())
-
     # Schedule daily fetch at a random time within the configured window
     _schedule_next_fetch(hass, entry, consumption_sensor)
 
@@ -137,16 +134,24 @@ class EVNSmartmeterSensor(SensorEntity):
 
     def __init__(self, hass, entry):
         self.hass = hass
+        self.entry = entry
         self.entry_id = entry.entry_id
         self._username = entry.data[CONF_USERNAME]
         self._password = entry.data[CONF_PASSWORD]
         self._attr_name = "EVN Smart Meter Import"
-        self._state = None
+        self._attr_native_value = None
         self._api = None
 
-    @property
-    def state(self):
-        return self._state
+    async def async_added_to_hass(self) -> None:
+        """Start the first import once the entity is registered."""
+        await super().async_added_to_hass()
+        # Immediately fetch data on startup / reload
+        self.entry.async_create_task(self.hass, self.async_update())
+
+    def _set_status(self, status: str) -> None:
+        """Update the import status and publish it to Home Assistant."""
+        self._attr_native_value = status
+        self.async_write_ha_state()
 
     async def _fetch_days(self, start, end):
         """Fetch consumption data for a date range (day by day)."""
@@ -251,27 +256,27 @@ class EVNSmartmeterSensor(SensorEntity):
             if all_day_data:
                 await self.save_to_home_assistant(all_day_data, last_stats)
                 self._update_monthly(all_day_data)
-                self._state = "Imported"
+                self._set_status("Imported")
                 _LOGGER.warning(
                     "EVN import complete: %d days imported", len(all_day_data)
                 )
             else:
                 _LOGGER.warning("No consumption data found")
-                self._state = "No data"
+                self._set_status("No data")
 
             return True
 
         except SmartmeterLoginError:
             _LOGGER.error("EVN login failed, check credentials")
-            self._state = "Login error"
+            self._set_status("Login error")
             return True  # permanent error — do not retry
         except SmartmeterConnectionError as err:
             _LOGGER.warning("Connection error: %s", err)
-            self._state = "Connection error"
+            self._set_status("Connection error")
             return False  # transient — caller may retry
         except Exception as err:
             _LOGGER.exception("Failed to update EVN data: %s", err)
-            self._state = "Error"
+            self._set_status("Error")
             return True  # unknown — do not retry
         finally:
             if self._api:
