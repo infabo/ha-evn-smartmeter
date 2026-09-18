@@ -292,7 +292,6 @@ class EVNSmartmeterSensor(SensorEntity):
                 await self.save_to_home_assistant(
                     all_day_data, last_stats, clear_existing=force_reimport
                 )
-                self._update_monthly(all_day_data)
                 self._set_status("Imported")
                 _LOGGER.warning(
                     "EVN import complete: %d days imported", len(all_day_data)
@@ -300,6 +299,10 @@ class EVNSmartmeterSensor(SensorEntity):
             else:
                 _LOGGER.warning("No consumption data found")
                 self._set_status("No data")
+
+            # Always refresh the monthly value from stored statistics so it
+            # is correct after restarts and on runs without new data.
+            await self._async_update_monthly()
 
             return True
 
@@ -420,21 +423,40 @@ class EVNSmartmeterSensor(SensorEntity):
                 _LOGGER.exception("Failed to save statistics: %s", err)
                 raise
 
-    def _update_monthly(self, all_data_by_date):
-        """Update the monthly consumption sensor."""
-        try:
-            monthly_sensor = self.hass.data.get(
-                "evn_smartmeter_monthly_sensor", {}
-            ).get(self.entry_id)
-            if not monthly_sensor:
-                return
+    async def _async_update_monthly(self) -> None:
+        """Recompute the monthly consumption sensor from stored statistics.
 
-            today = dt_util.now().date()
-            total_kwh = sum(
-                sum(v for v in values if v is not None)
-                for day, values in all_data_by_date.items()
-                if day.year == today.year and day.month == today.month
+        month total = last stored cumulative sum - sum before local month
+        start. Reading from the recorder instead of the last fetch makes the
+        value independent of how many days the run imported.
+        """
+        monthly_sensor = self.hass.data.get(
+            "evn_smartmeter_monthly_sensor", {}
+        ).get(self.entry_id)
+        if not monthly_sensor:
+            return
+
+        try:
+            statistic_id = f"{DOMAIN}:consumption"
+            recorder = get_instance(self.hass)
+            # Statistics queued by this run must be committed before reading.
+            await recorder.async_block_till_done()
+
+            last_stats = await recorder.async_add_executor_job(
+                get_last_statistics, self.hass, 1, statistic_id, True, {"sum"},
             )
+            month_start = _local_day_start_utc(dt_util.now().date().replace(day=1))
+
+            total_kwh = 0.0
+            rows = last_stats.get(statistic_id) if last_stats else None
+            if rows and rows[0].get("sum") is not None:
+                last_row = rows[0]
+                if last_row["start"] >= month_start.timestamp():
+                    sum_before_month = await self._get_sum_before(
+                        statistic_id, month_start
+                    )
+                    total_kwh = cast(float, last_row["sum"]) - sum_before_month
+
             monthly_sensor.set_total(total_kwh)
             _LOGGER.info("Updated monthly sensor to %.3f kWh", total_kwh)
         except Exception as err:
