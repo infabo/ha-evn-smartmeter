@@ -154,24 +154,26 @@ class EVNSmartmeterSensor(SensorEntity):
         self.async_write_ha_state()
 
     async def _fetch_days(self, start, end):
-        """Fetch consumption data for a date range (day by day)."""
+        """Fetch consumption data for a date range (day by day).
+
+        Days without any values are skipped. Connection and login errors
+        propagate to the caller so the run is marked as failed and retried
+        instead of being mistaken for missing data.
+        """
         data = {}
         current = start
         while current <= end:
-            try:
-                values = await self._api.get_consumption_per_day(current)
-                non_null = (
-                    [v for v in values if v is not None] if values else []
+            values = await self._api.get_consumption_per_day(current)
+            non_null = [v for v in values if v is not None] if values else []
+            if non_null:
+                data[current] = values
+                _LOGGER.debug(
+                    "Day %s: %d non-null values, sum=%.3f kWh",
+                    current.isoformat(),
+                    len(non_null),
+                    sum(non_null),
                 )
-                if non_null:
-                    data[current] = values
-                    _LOGGER.debug(
-                        "Day %s: %d non-null values, sum=%.3f kWh",
-                        current.isoformat(),
-                        len(non_null),
-                        sum(non_null),
-                    )
-            except Exception:
+            else:
                 _LOGGER.debug("No data for %s", current.isoformat())
             current += timedelta(days=1)
         return data

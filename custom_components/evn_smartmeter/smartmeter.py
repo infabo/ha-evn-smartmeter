@@ -175,18 +175,25 @@ class Smartmeter:
 
         Returns:
             List of consumption values (kWh) for each 15-min interval.
-            Values may be None if not yet available.
+            Values may be None if not yet available. An empty list means
+            the portal has no data for that day.
+
+        Raises:
+            SmartmeterConnectionError: on transport errors, non-200 responses
+                or an unparseable response body. Callers must not treat this
+                as "no data".
+            SmartmeterLoginError: if re-authentication fails.
         """
         # Portal uses non-padded format: YYYY-M-D
         day_str = f"{day.year}-{day.month}-{day.day}"
         _LOGGER.debug("Loading consumption for day %s", day_str)
         if self._metering_point_id is None:
             await self.get_meter_details()
+        response = await self._call_api(
+            self.API_CONSUMPTION_URL + "/Day",
+            params={"meterId": self._metering_point_id, "day": day_str},
+        )
         try:
-            response = await self._call_api(
-                self.API_CONSUMPTION_URL + "/Day",
-                params={"meterId": self._metering_point_id, "day": day_str},
-            )
             raw = response.json()
             if not raw:
                 return []
@@ -195,28 +202,31 @@ class Smartmeter:
             # meteredValues is an indexed array of 15-min interval consumption values
             metered = data.get("meteredValues", [])
             estimated = data.get("estimatedValues", [])
-            _LOGGER.debug(
-                "Day %s raw entry keys=%s meteredValues=%s estimatedValues=%s",
-                day_str,
-                list(data.keys()) if isinstance(data, dict) else "?",
-                metered[:5] if metered else metered,
-                estimated[:5] if estimated else estimated,
-            )
-            # Merge: use metered where available, fall back to estimated
-            values = [
-                m if m is not None else estimated[i] if i < len(estimated) else None
-                for i, m in enumerate(metered)
-            ]
-            non_null = [v for v in values if v is not None]
-            _LOGGER.debug(
-                "Day %s: %d values, %d non-null, sum=%.3f",
-                day_str, len(values), len(non_null),
-                sum(non_null) if non_null else 0.0,
-            )
-            return values
-        except (httpx.RequestError, ValueError, KeyError, IndexError, SmartmeterConnectionError) as err:
-            _LOGGER.warning("Error fetching day consumption for %s: %s", day_str, err)
-            return []
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as err:
+            # A 200 response that does not carry the expected JSON structure is
+            # most likely a maintenance page or an API change, not "no data".
+            raise SmartmeterConnectionError(
+                f"Unexpected response for day {day_str}: {err}"
+            ) from err
+        _LOGGER.debug(
+            "Day %s raw entry keys=%s meteredValues=%s estimatedValues=%s",
+            day_str,
+            list(data.keys()) if isinstance(data, dict) else "?",
+            metered[:5] if metered else metered,
+            estimated[:5] if estimated else estimated,
+        )
+        # Merge: use metered where available, fall back to estimated
+        values = [
+            m if m is not None else estimated[i] if i < len(estimated) else None
+            for i, m in enumerate(metered)
+        ]
+        non_null = [v for v in values if v is not None]
+        _LOGGER.debug(
+            "Day %s: %d values, %d non-null, sum=%.3f",
+            day_str, len(values), len(non_null),
+            sum(non_null) if non_null else 0.0,
+        )
+        return values
 
     async def get_consumption_for_month(
         self, year: int, month: int
