@@ -112,21 +112,29 @@ class Smartmeter:
     async def _call_api(
         self, url: str, params: dict[str, Any] | None = None
     ) -> httpx.Response:
-        """Call the API with automatic re-authentication on 401."""
+        """Call the API with automatic re-authentication on 401.
+
+        The request is sent at most twice: once with the current session
+        and, if that yields 401, once more after re-authenticating.
+        """
         if self._session is None:
             await self.authenticate()
-        retry_count = 0
-        while retry_count < 1:
-            response = await self._session.get(url, params=params)  # type: ignore[union-attr]
-            if response.status_code == 401:
-                await self.authenticate()
-                retry_count += 1
-            elif response.status_code == 200:
-                return response
-            else:
+        for attempt in range(2):
+            try:
+                response = await self._session.get(url, params=params)  # type: ignore[union-attr]
+            except httpx.RequestError as err:
                 raise SmartmeterConnectionError(
-                    f"API request failed with status {response.status_code}"
-                )
+                    f"API request to {url} failed: {err}"
+                ) from err
+            if response.status_code == 200:
+                return response
+            if response.status_code == 401 and attempt == 0:
+                _LOGGER.debug("Session expired, re-authenticating")
+                await self.authenticate()
+                continue
+            raise SmartmeterConnectionError(
+                f"API request failed with status {response.status_code}"
+            )
         raise SmartmeterConnectionError("API request failed after re-authentication")
 
     async def get_user_details(self) -> dict[str, Any]:
