@@ -90,6 +90,15 @@ _EMPTY_MONTHS_TO_STOP = 3
 # Hard upper bound for the first import, in months.
 _MAX_HISTORY_MONTHS = 60
 
+# Widening windows used to find the cumulative sum before an import window.
+# None means "all history". Each entry is queried with period="hour".
+_SUM_LOOKBACKS = (
+    timedelta(days=2),
+    timedelta(days=35),
+    timedelta(days=400),
+    None,
+)
+
 
 class EVNSmartmeterSensor(SensorEntity):
     """Import sensor: fetches EVN data and saves to HA external statistics."""
@@ -395,22 +404,27 @@ class EVNSmartmeterSensor(SensorEntity):
     async def _get_sum_before(self, statistic_id: str, before: datetime) -> float:
         """Return the cumulative sum of the last statistic strictly before `before`.
 
-        Checks the two preceding days first (the common case), then falls
-        back to the whole history so that a gap of any length between the
-        last stored hour and the import window cannot reset the sum to 0.
+        The window widens until a value is found, so a gap of any length
+        between the last stored hour and the import window cannot reset the
+        sum to 0. The common case stays a two-day query.
+
+        Only period="hour" is used. statistics_during_period() aligns the
+        query bounds to the period for "day", "week" and "month": a "month"
+        query moves the end to the end of that month, which would return a
+        sum from *after* `before` and corrupt the running total.
         """
         recorder = get_instance(self.hass)
-        for start, period in (
-            (before - timedelta(days=2), "hour"),
-            (_EPOCH, "month"),
-        ):
+        for lookback in _SUM_LOOKBACKS:
+            start = _EPOCH if lookback is None else max(before - lookback, _EPOCH)
+            if start >= before:
+                continue
             stats = await recorder.async_add_executor_job(
                 statistics_during_period,
                 self.hass,
                 start,
                 before,
                 {statistic_id},
-                period,
+                "hour",
                 None,
                 {"sum"},
             )
