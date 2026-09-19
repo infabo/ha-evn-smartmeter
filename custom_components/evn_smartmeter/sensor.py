@@ -24,6 +24,7 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.components.recorder.util import get_instance
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
@@ -62,46 +63,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     async_add_entities([consumption_sensor, monthly_sensor])
 
-    # Schedule daily fetch at a random time within the configured window
-    _schedule_next_fetch(hass, entry, consumption_sensor)
-
-
-def _schedule_next_fetch(hass, entry, consumption_sensor):
-    """Schedule the next fetch at a random time within [fetch_hour_start, fetch_hour_end)."""
-    hour_start = int(entry.options.get(CONF_FETCH_HOUR_START, DEFAULT_FETCH_HOUR_START))
-    hour_end = int(entry.options.get(CONF_FETCH_HOUR_END, DEFAULT_FETCH_HOUR_END))
-
-    if hour_end > hour_start:
-        offset_minutes = random.randint(0, (hour_end - hour_start) * 60 - 1)
-    else:
-        offset_minutes = 0
-
-    fetch_hour = hour_start + offset_minutes // 60
-    fetch_minute = offset_minutes % 60
-
-    now = dt_util.now()
-    fetch_dt = dt_util.as_local(
-        datetime.combine(now.date(), dt_time(hour=fetch_hour, minute=fetch_minute))
-    )
-    if fetch_dt <= now:
-        fetch_dt = dt_util.as_local(
-            datetime.combine(
-                now.date() + timedelta(days=1),
-                dt_time(hour=fetch_hour, minute=fetch_minute),
-            )
-        )
-
-    async def _run(_now):
-        success = await consumption_sensor.async_update()
-        if not success:
-            _schedule_retry(hass, entry, consumption_sensor, attempt=1)
-        else:
-            _schedule_next_fetch(hass, entry, consumption_sensor)
-
-    unsub = async_track_point_in_time(hass, _run, fetch_dt)
-    entry.async_on_unload(unsub)
-    _LOGGER.debug("Next EVN fetch scheduled at %s", fetch_dt.isoformat())
-
 
 _MAX_RETRIES = 2
 _RETRY_DELAY_MINUTES = 30
@@ -112,35 +73,6 @@ _RETRY_DELAY_MINUTES = 30
 _EMPTY_MONTHS_TO_STOP = 3
 # Hard upper bound for the first import, in months.
 _MAX_HISTORY_MONTHS = 60
-
-
-def _schedule_retry(hass, entry, consumption_sensor, attempt: int):
-    """Retry a failed fetch up to _MAX_RETRIES times, _RETRY_DELAY_MINUTES apart."""
-    if attempt > _MAX_RETRIES:
-        _LOGGER.warning(
-            "EVN fetch failed after %d retries; giving up until next scheduled run",
-            _MAX_RETRIES,
-        )
-        _schedule_next_fetch(hass, entry, consumption_sensor)
-        return
-
-    retry_at = dt_util.now() + timedelta(minutes=_RETRY_DELAY_MINUTES)
-    _LOGGER.warning(
-        "EVN connection error; scheduling retry %d/%d at %s",
-        attempt,
-        _MAX_RETRIES,
-        retry_at.strftime("%H:%M"),
-    )
-
-    async def _run(_now):
-        success = await consumption_sensor.async_update()
-        if not success:
-            _schedule_retry(hass, entry, consumption_sensor, attempt + 1)
-        else:
-            _schedule_next_fetch(hass, entry, consumption_sensor)
-
-    unsub = async_track_point_in_time(hass, _run, retry_at)
-    entry.async_on_unload(unsub)
 
 
 class EVNSmartmeterSensor(SensorEntity):
@@ -162,14 +94,95 @@ class EVNSmartmeterSensor(SensorEntity):
         # fetch and the reset service so they never share a client or write
         # overlapping statistics with different baselines.
         self._lock = asyncio.Lock()
+        # Exactly one pending timer at a time (daily fetch or retry)
+        self._unsub_timer: CALLBACK_TYPE | None = None
         # Set by the reset_statistics service before calling async_update()
         self.force_reimport = False
 
     async def async_added_to_hass(self) -> None:
         """Start the first import once the entity is registered."""
         await super().async_added_to_hass()
-        # Immediately fetch data on startup / reload
-        self.entry.async_create_task(self.hass, self.async_update())
+        self.async_on_remove(self._cancel_timer)
+        # Schedule the daily fetch, then import immediately on startup / reload
+        self._schedule_next_fetch()
+        self.entry.async_create_task(self.hass, self._async_startup_fetch())
+
+    async def _async_startup_fetch(self) -> None:
+        """Run the import once at startup and retry it if it failed."""
+        if not await self.async_update():
+            self._schedule_retry(attempt=1)
+
+    @callback
+    def _cancel_timer(self) -> None:
+        """Cancel the pending timer, if any."""
+        if self._unsub_timer is not None:
+            self._unsub_timer()
+            self._unsub_timer = None
+
+    @callback
+    def _schedule_at(self, when: datetime, attempt: int) -> None:
+        """Replace the pending timer with a run at `when`.
+
+        Keeping a single slot means a retry cannot run alongside the daily
+        timer, and no unsubscribe callbacks pile up over time.
+        """
+        self._cancel_timer()
+
+        async def _run(_now) -> None:
+            self._unsub_timer = None
+            if await self.async_update():
+                self._schedule_next_fetch()
+            else:
+                self._schedule_retry(attempt + 1)
+
+        self._unsub_timer = async_track_point_in_time(self.hass, _run, when)
+
+    @callback
+    def _schedule_next_fetch(self) -> None:
+        """Schedule the daily fetch at a random time within the configured window."""
+        options = self.entry.options
+        hour_start = int(
+            options.get(CONF_FETCH_HOUR_START, DEFAULT_FETCH_HOUR_START)
+        )
+        hour_end = int(options.get(CONF_FETCH_HOUR_END, DEFAULT_FETCH_HOUR_END))
+
+        if hour_end > hour_start:
+            offset_minutes = random.randint(0, (hour_end - hour_start) * 60 - 1)
+        else:
+            offset_minutes = 0
+
+        now = dt_util.now()
+        fetch_time = dt_time(
+            hour=hour_start + offset_minutes // 60, minute=offset_minutes % 60
+        )
+        fetch_dt = dt_util.as_local(datetime.combine(now.date(), fetch_time))
+        if fetch_dt <= now:
+            fetch_dt = dt_util.as_local(
+                datetime.combine(now.date() + timedelta(days=1), fetch_time)
+            )
+
+        self._schedule_at(fetch_dt, attempt=0)
+        _LOGGER.debug("Next EVN fetch scheduled at %s", fetch_dt.isoformat())
+
+    @callback
+    def _schedule_retry(self, attempt: int) -> None:
+        """Retry a failed fetch up to _MAX_RETRIES times, _RETRY_DELAY_MINUTES apart."""
+        if attempt > _MAX_RETRIES:
+            _LOGGER.warning(
+                "EVN fetch failed after %d retries; giving up until next scheduled run",
+                _MAX_RETRIES,
+            )
+            self._schedule_next_fetch()
+            return
+
+        retry_at = dt_util.now() + timedelta(minutes=_RETRY_DELAY_MINUTES)
+        _LOGGER.warning(
+            "EVN fetch failed; scheduling retry %d/%d at %s",
+            attempt,
+            _MAX_RETRIES,
+            retry_at.strftime("%H:%M"),
+        )
+        self._schedule_at(retry_at, attempt=attempt)
 
     def _set_status(self, status: str) -> None:
         """Update the import status and publish it to Home Assistant."""
