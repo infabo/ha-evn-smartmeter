@@ -8,6 +8,8 @@ Changes from upstream:
 - Removed aiofiles/asyncio/requests dependencies
 - Replaced print() with logging
 - Added proper session lifecycle management
+- Use Home Assistant's prebuilt SSL context instead of letting httpx
+  load the CA bundle on the event loop
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ from datetime import date
 from typing import Any
 
 import httpx
+
+from homeassistant.core import HomeAssistant
+from homeassistant.util.ssl import get_default_context
 
 from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
@@ -36,7 +41,10 @@ class Smartmeter:
     )
     API_CONSUMPTION_URL = API_BASE_URL + "/ConsumptionRecord"
 
-    def __init__(self, username: str, password: str) -> None:
+    def __init__(
+        self, hass: HomeAssistant, username: str, password: str
+    ) -> None:
+        self._hass = hass
         self._username = username
         self._password = password
         self._session: httpx.AsyncClient | None = None
@@ -55,9 +63,16 @@ class Smartmeter:
             self._session = None
 
         _LOGGER.debug("Starting new session and authenticating")
-        # Create client in executor to avoid blocking the event loop
-        # (httpx loads SSL certificates in the constructor)
-        session = await asyncio.to_thread(httpx.AsyncClient, timeout=30.0)
+        # Home Assistant builds its client SSL context at import time, so
+        # passing it in keeps httpx from loading the CA bundle on the event
+        # loop. The client is created here rather than through
+        # helpers.httpx_client.create_async_httpx_client because that helper
+        # wraps aclose() in a deprecation warning and registers a shutdown
+        # listener per client, neither of which suits a per-run client that
+        # must keep its own login cookies.
+        session = httpx.AsyncClient(
+            verify=get_default_context(), timeout=30.0
+        )
         auth_data = {"user": self._username, "pwd": self._password}
 
         _AUTH_RETRY_DELAYS = (0, 5, 15)  # seconds before each attempt

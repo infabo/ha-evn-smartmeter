@@ -253,7 +253,7 @@ class EVNSmartmeterSensor(SensorEntity):
 
     async def _async_run_import(self) -> bool:
         """Run one import. Caller must hold self._lock."""
-        api = Smartmeter(self._username, self._password)
+        api = Smartmeter(self.hass, self._username, self._password)
         try:
             await api.authenticate()
             await api.get_meter_details()

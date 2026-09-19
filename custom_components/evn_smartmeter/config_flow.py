@@ -130,7 +130,7 @@ class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
         self, username: str, password: str
     ) -> str | None:
         """Validate credentials. Returns error key or None on success."""
-        api = Smartmeter(username, password)
+        api = Smartmeter(self.hass, username, password)
 
         try:
             await api.authenticate()
