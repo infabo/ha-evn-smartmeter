@@ -122,16 +122,42 @@ class EVNSmartmeterSensor(SensorEntity):
         self._lock = asyncio.Lock()
         # Exactly one pending timer at a time (daily fetch or retry)
         self._unsub_timer: CALLBACK_TYPE | None = None
+        # Set once the entity is removed; stops any further scheduling
+        self._removed = False
         # Set by the reset_statistics service before calling async_update()
         self.force_reimport = False
 
     async def async_added_to_hass(self) -> None:
         """Start the first import once the entity is registered."""
         await super().async_added_to_hass()
-        self.async_on_remove(self._cancel_timer)
+        self.async_on_remove(self._handle_removal)
         # Schedule the daily fetch, then import immediately on startup / reload
         self._schedule_next_fetch()
-        self.entry.async_create_task(self.hass, self._async_startup_fetch())
+        self._start_run(self._async_startup_fetch())
+
+    @callback
+    def _handle_removal(self) -> None:
+        """Stop scheduling once the entity is gone.
+
+        A run already in flight is a background task of the config entry and
+        is cancelled by Home Assistant when the entry unloads. This flag
+        makes sure such a run cannot register a new timer on its way out,
+        which would otherwise keep a stale instance alive across a reload
+        and let two instances write to the same statistic.
+        """
+        self._removed = True
+        self._cancel_timer()
+
+    @callback
+    def _start_run(self, coro) -> None:
+        """Run an import as a background task tied to the config entry.
+
+        async_create_task() would only be awaited for ten seconds on unload,
+        not cancelled; background tasks are cancelled.
+        """
+        self.entry.async_create_background_task(
+            self.hass, coro, name=f"{DOMAIN} import {self.entry_id}"
+        )
 
     async def _async_startup_fetch(self) -> None:
         """Run the import once at startup and retry it if it failed."""
@@ -161,18 +187,27 @@ class EVNSmartmeterSensor(SensorEntity):
         """Replace the pending timer with a run at `when`.
 
         Keeping a single slot means a retry cannot run alongside the daily
-        timer, and no unsubscribe callbacks pile up over time.
+        timer, and no unsubscribe callbacks pile up over time. Nothing is
+        scheduled once the entity has been removed.
         """
         self._cancel_timer()
+        if self._removed:
+            return
 
-        async def _run(_now) -> None:
+        @callback
+        def _fire(_now) -> None:
             self._unsub_timer = None
-            if await self.async_update():
-                self._schedule_next_fetch()
-            else:
-                self._schedule_retry(attempt + 1)
+            self._start_run(self._async_timed_run(attempt))
 
-        self._unsub_timer = async_track_point_in_time(self.hass, _run, when)
+        self._unsub_timer = async_track_point_in_time(self.hass, _fire, when)
+        _LOGGER.debug("Next EVN run scheduled at %s", when.isoformat())
+
+    async def _async_timed_run(self, attempt: int) -> None:
+        """Run a scheduled import and queue the follow-up."""
+        if await self.async_update():
+            self._schedule_next_fetch()
+        else:
+            self._schedule_retry(attempt + 1)
 
     @callback
     def _schedule_next_fetch(self) -> None:
@@ -199,7 +234,6 @@ class EVNSmartmeterSensor(SensorEntity):
             )
 
         self._schedule_at(fetch_dt, attempt=0)
-        _LOGGER.debug("Next EVN fetch scheduled at %s", fetch_dt.isoformat())
 
     @callback
     def _schedule_retry(self, attempt: int) -> None:
