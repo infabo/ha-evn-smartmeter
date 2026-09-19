@@ -10,11 +10,13 @@ Importiert Stromverbrauchsdaten deines Smart Meters als **externe Statistiken** 
 ## Features
 
 - 📊 **Externer Statistik-Import** – stündliche Verbrauchsdaten (kWh) als HA-Statistik (`evn_smartmeter:consumption`), kompatibel mit dem Energy Dashboard
-- 📅 **Monatsverbrauch** – kumulativer Verbrauch des aktuellen Monats als Sensor (kWh)
-- 🔄 **Täglicher Fetch um 06:00** – automatisch via `async_track_time_change`
-- 🔄 **Sofortiger Fetch bei Reload** – Daten werden auch beim Neuladen der Integration abgerufen
-- 🔐 Login über Username/Password des Smart Meter Portals
-- 📆 **7-Tage-Lookback** – importiert die letzten 7 Tage bei jedem Fetch
+- 📅 **Monatsverbrauch** – Verbrauch des laufenden Monats als Sensor (kWh), berechnet aus den gespeicherten Statistiken
+- 🕕 **Täglicher Fetch im Zeitfenster** – zu einer zufälligen Minute zwischen 05:00 und 07:00, per Optionen einstellbar
+- 🔄 **Sofortiger Fetch bei Start und Reload** – Daten werden auch beim Neuladen der Integration abgerufen
+- ♻️ **Automatische Wiederholung** – bei Verbindungsfehlern oder noch nicht veröffentlichten Vortagsdaten bis zu zweimal im Abstand von 30 Minuten
+- 📆 **Vollständige Historie beim ersten Import** – danach werden nur noch neue Tage geholt
+- 🔐 Login über Username/Password des Smart Meter Portals, mit erneuter Anmeldung bei abgelehnten Zugangsdaten
+- 👥 **Mehrere Konten** – jedes Konto bekommt seine eigene Statistik
 
 ## Installation (HACS)
 
@@ -31,6 +33,16 @@ Importiert Stromverbrauchsdaten deines Smart Meters als **externe Statistiken** 
 3. Zugangsdaten für [smartmeter.netz-noe.at](https://smartmeter.netz-noe.at/) eingeben
 4. Fertig! Die Sensoren werden automatisch erstellt und der erste Datenimport startet sofort.
 
+Der erste Import holt die gesamte im Portal verfügbare Historie, Monat für Monat rückwärts. Je nach Alter des Zählers dauert das einige Minuten.
+
+### Optionen
+
+Unter **Konfigurieren** lässt sich das Zeitfenster für den täglichen Abruf einstellen. Der genaue Zeitpunkt wird innerhalb des Fensters zufällig gewählt, damit nicht alle Installationen gleichzeitig auf das Portal zugreifen. Voreinstellung ist 05:00 bis 07:00.
+
+### Dienst `evn_smartmeter.reset_statistics`
+
+Löscht die gespeicherten Statistiken und importiert die vollständige Historie neu. Nützlich, wenn die kumulative Summe durch Datenlücken verfälscht wurde.
+
 ## Energy Dashboard
 
 1. **Einstellungen** → **Dashboards** → **Energie**
@@ -38,28 +50,34 @@ Importiert Stromverbrauchsdaten deines Smart Meters als **externe Statistiken** 
 3. Statistik `evn_smartmeter:consumption` auswählen
 4. Speichern
 
+Bei mehreren Konten trägt das zuerst eingerichtete Konto die ID `evn_smartmeter:consumption`, jedes weitere `evn_smartmeter:consumption_<benutzername>`.
+
 ## Sensoren & Statistiken
 
 | Name | Typ | Beschreibung | Einheit |
 |------|-----|-------------|---------|
-| EVN Smart Meter Import | Sensor | Zeigt den Import-Status (`Imported`, `No data`, `Error`, …) | – |
-| EVN Smart Meter Monthly Consumption | Sensor | Kumulativer Verbrauch des aktuellen Monats | kWh |
+| EVN Smart Meter Import | Sensor | Zeigt den Import-Status (`Imported`, `No data`, `Login error`, `Connection error`, `Error`) | – |
+| EVN Smart Meter Monthly Consumption | Sensor | Verbrauch des laufenden Monats | kWh |
 | evn_smartmeter:consumption | Externe Statistik | Stündliche Verbrauchsdaten für das Energy Dashboard | kWh |
+
+Beide Sensoren hängen an einem Gerät pro Konto und lassen sich damit einem Bereich zuordnen.
 
 ## Architektur
 
 Die Integration folgt dem Muster der [enelgrid](https://github.com/sathia-musso/enelgrid) Integration:
 
 - Die 15-Minuten-Intervalle der EVN API werden zu **stündlichen** Werten aggregiert (HA-Statistiken erfordern Top-of-Hour-Timestamps)
+- Die Stundenstempel werden als verstrichene Zeit ab lokaler Mitternacht berechnet, damit die Zeitumstellung keine doppelten oder fehlenden Stunden erzeugt
 - Daten werden als **externe Statistiken** gespeichert (`async_add_external_statistics`), nicht als Entity-States
-- Der Import-Sensor (`should_poll = False`) triggert keine automatischen Updates – nur der tägliche Timer und Reload lösen Fetches aus
-- Bei jedem Fetch werden die letzten 7 Tage importiert (Upsert – vorhandene Stunden werden aktualisiert)
+- Der Import-Sensor (`should_poll = False`) triggert keine automatischen Updates – nur der Timer, der Start und der Reset-Dienst lösen Fetches aus
+- Der erste Import holt die gesamte Historie; danach wird ab dem letzten gespeicherten Statistikwert fortgeschrieben (Upsert – vorhandene Stunden werden aktualisiert)
+- Die kumulative Summe wird aus dem letzten gespeicherten Wert vor dem Importfenster fortgeschrieben, auch wenn davor Tage fehlen
 
 ## Hinweise
 
-- Die Daten stammen von der API des Smart Meter Portals und sind typischerweise am nächsten Morgen verfügbar.
-- Der erste Fetch nach Installation importiert sofort die letzten 7 Tage.
-- Die Integration nutzt einen vendored [PyNoeSmartmeter](https://github.com/Xlinx64/PyNoeSmartmeter) Client.
+- Die Daten stammen von der API des Smart Meter Portals und sind typischerweise am nächsten Morgen verfügbar. Fehlen die Vortagswerte beim Abruf noch, wiederholt die Integration den Versuch.
+- Der erste Fetch nach Installation importiert die gesamte verfügbare Historie.
+- Die Integration nutzt einen vendored [PyNoeSmartmeter](https://github.com/Xlinx64/PyNoeSmartmeter) Client und benötigt keine zusätzlichen Python-Pakete.
 
 ## Credits
 
