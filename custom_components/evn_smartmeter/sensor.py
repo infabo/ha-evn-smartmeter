@@ -236,12 +236,7 @@ class EVNSmartmeterSensor(SensorEntity):
         day of the last known statistic up to yesterday.
         """
         async with self._lock:
-            completed = await self._async_run_import()
-        if completed:
-            # Only a completed run consumes a pending reimport request; a
-            # transient failure keeps it so the retry redoes the full import.
-            self.force_reimport = False
-        return completed
+            return await self._async_run_import()
 
     async def _async_run_import(self) -> bool:
         """Run one import. Caller must hold self._lock."""
@@ -333,17 +328,32 @@ class EVNSmartmeterSensor(SensorEntity):
                 await self.save_to_home_assistant(
                     all_day_data, last_stats, clear_existing=force_reimport
                 )
+                # The rebuild has been written; a pending reimport request is
+                # consumed here and not by merely finishing the run, so a run
+                # that fails earlier keeps it for the retry.
+                self.force_reimport = False
                 self._set_status("Imported")
-                _LOGGER.warning(
+                _LOGGER.info(
                     "EVN import complete: %d days imported", len(all_day_data)
                 )
             else:
-                _LOGGER.warning("No consumption data found")
+                _LOGGER.info("No consumption data found")
                 self._set_status("No data")
 
             # Always refresh the monthly value from stored statistics so it
             # is correct after restarts and on runs without new data.
             await self._async_update_monthly()
+
+            # The portal usually publishes yesterday's values during the
+            # morning. If they are still missing, ask for a retry instead of
+            # waiting a full day. A first import that found no history at all
+            # is excluded: retrying would rescan every month for nothing.
+            if yesterday not in all_day_data and (last_stats or all_day_data):
+                _LOGGER.info(
+                    "No data for %s yet; requesting a retry",
+                    yesterday.isoformat(),
+                )
+                return False
 
             return True
 
