@@ -41,5 +41,11 @@
     "error": {
       "invalid_range": "Die früheste Stunde muss kleiner als die späteste Stunde sein"
     }
+  },
+  "services": {
+    "reset_statistics": {
+      "name": "Statistiken zurücksetzen",
+      "description": "Löscht die gespeicherten EVN-Smart-Meter-Statistiken und importiert die vollständige Historie neu aus dem Portal."
+    }
   }
 }
