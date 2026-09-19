@@ -5,6 +5,7 @@ external statistics, following the pattern used by the official elvia
 integration (homeassistant/components/elvia/importer.py).
 """
 
+import asyncio
 import logging
 import random
 from datetime import date, datetime, time as dt_time, timedelta
@@ -157,7 +158,10 @@ class EVNSmartmeterSensor(SensorEntity):
         self._attr_name = "EVN Smart Meter Import"
         self._attr_unique_id = f"{entry.entry_id}_import"
         self._attr_native_value = None
-        self._api = None
+        # Serialises runs started by the timer, the retry chain, the startup
+        # fetch and the reset service so they never share a client or write
+        # overlapping statistics with different baselines.
+        self._lock = asyncio.Lock()
         # Set by the reset_statistics service before calling async_update()
         self.force_reimport = False
 
@@ -172,7 +176,7 @@ class EVNSmartmeterSensor(SensorEntity):
         self._attr_native_value = status
         self.async_write_ha_state()
 
-    async def _fetch_days(self, start, end):
+    async def _fetch_days(self, api: Smartmeter, start, end):
         """Fetch consumption data for a date range (day by day).
 
         Days without any values are skipped. Connection and login errors
@@ -182,7 +186,7 @@ class EVNSmartmeterSensor(SensorEntity):
         data = {}
         current = start
         while current <= end:
-            values = await self._api.get_consumption_per_day(current)
+            values = await api.get_consumption_per_day(current)
             non_null = [v for v in values if v is not None] if values else []
             if non_null:
                 data[current] = values
@@ -207,10 +211,15 @@ class EVNSmartmeterSensor(SensorEntity):
         consecutive months are empty. Subsequent imports: re-fetch from the
         day of the last known statistic up to yesterday.
         """
+        async with self._lock:
+            return await self._async_run_import()
+
+    async def _async_run_import(self) -> bool:
+        """Run one import. Caller must hold self._lock."""
+        api = Smartmeter(self._username, self._password)
         try:
-            self._api = Smartmeter(self._username, self._password)
-            await self._api.authenticate()
-            await self._api.get_meter_details()
+            await api.authenticate()
+            await api.get_meter_details()
 
             # Determine fetch range (elvia pattern)
             statistic_id = self._statistic_id
@@ -248,7 +257,7 @@ class EVNSmartmeterSensor(SensorEntity):
                         - timedelta(days=1)
                     )
                     month_end = min(month_last, yesterday)
-                    month_data = await self._fetch_days(month_start, month_end)
+                    month_data = await self._fetch_days(api, month_start, month_end)
 
                     if month_data:
                         empty_months = 0
@@ -290,7 +299,7 @@ class EVNSmartmeterSensor(SensorEntity):
                     (today - start_date).days,
                     start_date.isoformat(),
                 )
-                all_day_data = await self._fetch_days(start_date, yesterday)
+                all_day_data = await self._fetch_days(api, start_date, yesterday)
 
             if all_day_data:
                 await self.save_to_home_assistant(
@@ -323,8 +332,7 @@ class EVNSmartmeterSensor(SensorEntity):
             self._set_status("Error")
             return True  # unknown — do not retry
         finally:
-            if self._api:
-                await self._api.close()
+            await api.close()
 
     async def _get_sum_before(self, statistic_id: str, before: datetime) -> float:
         """Return the cumulative sum of the last statistic strictly before `before`.
