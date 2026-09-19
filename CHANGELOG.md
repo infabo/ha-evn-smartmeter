@@ -78,6 +78,9 @@ behoben, darunter mehrere, die gespeicherte Energiedaten verfälschen konnten.
   dokumentiert.
 - Der Monatssensor meldet über die reguläre Sensor-Schnittstelle statt über einen
   überschriebenen Zustand.
+- Der Dienst `reset_statistics` kehrt jetzt sofort zurück und arbeitet im Hintergrund.
+  Bisher blockierte der Aufruf, bis die gesamte Historie neu geladen war, was bei
+  langen Importen den aufrufenden Automatisierungsschritt aufhielt.
 - Zwei ungenutzte API-Methoden entfernt.
 
 ## [1.0.4] – davor

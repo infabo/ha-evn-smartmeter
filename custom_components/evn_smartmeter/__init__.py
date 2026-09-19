@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.util import slugify
 
 from .const import CONF_STATISTIC_ID, DOMAIN, LEGACY_STATISTIC_ID
@@ -63,11 +63,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNConfigEntry) -> bool:
     """Set up EVN Smart Meter from a config entry."""
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    async def handle_reset_statistics(_call: ServiceCall) -> None:
-        """Reset statistics and trigger a full reimport for every account."""
+    @callback
+    def handle_reset_statistics(_call: ServiceCall) -> None:
+        """Reset statistics and trigger a full reimport for every account.
+
+        Each import is queued as a background task of its config entry, so
+        the service returns immediately and an unload can cancel the work.
+        """
         _LOGGER.warning("Statistics reimport requested via service call")
         for loaded in hass.config_entries.async_loaded_entries(DOMAIN):
-            await loaded.runtime_data.import_sensor.async_request_reimport()
+            loaded.runtime_data.import_sensor.async_request_reimport()
 
     if not hass.services.has_service(DOMAIN, "reset_statistics"):
         hass.services.async_register(

@@ -124,7 +124,7 @@ class EVNSmartmeterSensor(SensorEntity):
         self._unsub_timer: CALLBACK_TYPE | None = None
         # Set once the entity is removed; stops any further scheduling
         self._removed = False
-        # Set by the reset_statistics service before calling async_update()
+        # Set by async_request_reimport(); consumed by the run that rebuilds
         self.force_reimport = False
 
     async def async_added_to_hass(self) -> None:
@@ -139,9 +139,10 @@ class EVNSmartmeterSensor(SensorEntity):
     def _handle_removal(self) -> None:
         """Stop scheduling once the entity is gone.
 
-        A run already in flight is a background task of the config entry and
-        is cancelled by Home Assistant when the entry unloads. This flag
-        makes sure such a run cannot register a new timer on its way out,
+        Every import path goes through _start_run(), so a run in flight is a
+        background task of the config entry and is cancelled by Home
+        Assistant when the entry unloads. This flag makes sure such a run
+        cannot register a new timer on its way out,
         which would otherwise keep a stale instance alive across a reload
         and let two instances write to the same statistic.
         """
@@ -164,14 +165,24 @@ class EVNSmartmeterSensor(SensorEntity):
         if not await self.async_update():
             self._schedule_retry(attempt=1)
 
-    async def async_request_reimport(self) -> None:
+    @callback
+    def async_request_reimport(self) -> None:
         """Drop the stored statistic and reimport the full history.
 
-        Used by the reset_statistics service. A transient failure is handed
-        to the retry chain, which repeats the full reimport because the
-        request is only consumed by a completed run.
+        Used by the reset_statistics service. The import runs as a
+        background task of the config entry rather than in the service
+        call, so an unload cancels it and the service returns at once
+        instead of blocking for the length of a full history import.
+
+        A transient failure is handed to the retry chain, which repeats the
+        full reimport because the request is only consumed by a run that
+        actually wrote the rebuild.
         """
         self.force_reimport = True
+        self._start_run(self._async_reimport_run())
+
+    async def _async_reimport_run(self) -> None:
+        """Run the requested reimport and retry it if it failed."""
         if not await self.async_update():
             self._schedule_retry(attempt=1)
 
