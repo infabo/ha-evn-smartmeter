@@ -26,6 +26,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
 from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
 
@@ -49,6 +50,17 @@ _EPOCH = dt_util.utc_from_timestamp(0)
 def _local_day_start_utc(day: date) -> datetime:
     """Return local midnight of `day` (HA time zone) as a UTC datetime."""
     return dt_util.as_utc(dt_util.start_of_local_day(day))
+
+
+def _device_info(entry) -> DeviceInfo:
+    """Service device grouping both entities of one account."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        entry_type=DeviceEntryType.SERVICE,
+        manufacturer="Netz Niederösterreich",
+        name=f"EVN Smart Meter ({entry.data[CONF_USERNAME]})",
+        configuration_url="https://smartmeter.netz-noe.at/",
+    )
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -89,6 +101,7 @@ class EVNSmartmeterSensor(SensorEntity):
         self._statistic_id = entry.data[CONF_STATISTIC_ID]
         self._attr_name = "EVN Smart Meter Import"
         self._attr_unique_id = f"{entry.entry_id}_import"
+        self._attr_device_info = _device_info(entry)
         self._attr_native_value = None
         # Serialises runs started by the timer, the retry chain, the startup
         # fetch and the reset service so they never share a client or write
@@ -516,11 +529,14 @@ class EVNSmartmeterMonthlySensor(SensorEntity):
     """Monthly cumulative total sensor."""
 
     def __init__(self, entry):
-        # Kept as the suggested object id so existing installations keep
-        # their entity id; the registry appends a suffix for further accounts.
+        # Pre-setting entity_id makes the platform pass this object id to the
+        # entity registry as a suggestion, so installations that predate the
+        # registry entry keep their id and further accounts get a suffix.
+        # Entity._attr_suggested_object_id does not exist, do not use it.
         self.entity_id = "sensor.evn_smartmeter_monthly_consumption"
         self._attr_unique_id = f"{entry.entry_id}_monthly"
         self._attr_name = "EVN Smart Meter Monthly Consumption"
+        self._attr_device_info = _device_info(entry)
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_state_class = "total_increasing"
         self._attr_native_unit_of_measurement = "kWh"
