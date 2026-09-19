@@ -22,7 +22,11 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.components.recorder.util import get_instance
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, UnitOfEnergy
 from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -538,16 +542,16 @@ class EVNSmartmeterMonthlySensor(SensorEntity):
         self._attr_name = "EVN Smart Meter Monthly Consumption"
         self._attr_device_info = _device_info(entry)
         self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = "total_increasing"
-        self._attr_native_unit_of_measurement = "kWh"
-        self._state = 0
-        self._attr_extra_state_attributes = {"source": "evn_smartmeter"}
+        # The value restarts at 0 each month; total_increasing tells the
+        # statistics engine to treat that drop as a cycle reset.
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_native_value = 0.0
+        self._attr_extra_state_attributes = {"source": DOMAIN}
 
-    @property
-    def state(self):
-        return self._state
-
-    def set_total(self, new_total):
-        self._state = round(new_total, 3)
+    @callback
+    def set_total(self, new_total: float) -> None:
+        """Publish the month-to-date total in kWh."""
+        self._attr_native_value = round(new_total, 3)
         self.async_write_ha_state()
 
