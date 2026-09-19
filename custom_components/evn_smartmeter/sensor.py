@@ -360,6 +360,9 @@ class EVNSmartmeterSensor(SensorEntity):
         except SmartmeterLoginError:
             _LOGGER.error("EVN login failed, check credentials")
             self._set_status("Login error")
+            # Ask the user for new credentials instead of failing silently
+            # every day; retrying the same rejected password is pointless.
+            self.entry.async_start_reauth(self.hass)
             return True  # permanent error — do not retry
         except SmartmeterConnectionError as err:
             _LOGGER.warning("Connection error: %s", err)
