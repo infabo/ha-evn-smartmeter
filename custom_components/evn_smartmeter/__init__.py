@@ -67,9 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNConfigEntry) -> bool:
         """Reset statistics and trigger a full reimport for every account."""
         _LOGGER.warning("Statistics reimport requested via service call")
         for loaded in hass.config_entries.async_loaded_entries(DOMAIN):
-            sensor = loaded.runtime_data.import_sensor
-            sensor.force_reimport = True
-            await sensor.async_update()
+            await loaded.runtime_data.import_sensor.async_request_reimport()
 
     if not hass.services.has_service(DOMAIN, "reset_statistics"):
         hass.services.async_register(

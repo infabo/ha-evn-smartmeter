@@ -112,6 +112,17 @@ class EVNSmartmeterSensor(SensorEntity):
         if not await self.async_update():
             self._schedule_retry(attempt=1)
 
+    async def async_request_reimport(self) -> None:
+        """Drop the stored statistic and reimport the full history.
+
+        Used by the reset_statistics service. A transient failure is handed
+        to the retry chain, which repeats the full reimport because the
+        request is only consumed by a completed run.
+        """
+        self.force_reimport = True
+        if not await self.async_update():
+            self._schedule_retry(attempt=1)
+
     @callback
     def _cancel_timer(self) -> None:
         """Cancel the pending timer, if any."""
@@ -225,7 +236,12 @@ class EVNSmartmeterSensor(SensorEntity):
         day of the last known statistic up to yesterday.
         """
         async with self._lock:
-            return await self._async_run_import()
+            completed = await self._async_run_import()
+        if completed:
+            # Only a completed run consumes a pending reimport request; a
+            # transient failure keeps it so the retry redoes the full import.
+            self.force_reimport = False
+        return completed
 
     async def _async_run_import(self) -> bool:
         """Run one import. Caller must hold self._lock."""
@@ -239,7 +255,6 @@ class EVNSmartmeterSensor(SensorEntity):
             recorder = get_instance(self.hass)
 
             force_reimport = self.force_reimport
-            self.force_reimport = False
 
             if force_reimport:
                 last_stats = None
