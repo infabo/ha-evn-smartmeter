@@ -56,6 +56,9 @@ behoben, darunter mehrere, die gespeicherte Energiedaten verfälschen konnten.
   Vortagswerte noch nicht veröffentlicht hatte. Beides wird jetzt bis zu zweimal im
   Abstand von 30 Minuten wiederholt.
 - **Timer-Callbacks sammelten sich** mit jeder Neuplanung an.
+- **Laufende Importe überlebten einen Reload.** Der beim Start ausgelöste Import war
+  nicht an die Integration gebunden und lief nach einem Neuladen weiter, parallel zum
+  neuen. Importe laufen jetzt als Background-Task und werden beim Entladen abgebrochen.
 
 ### Neu
 
