@@ -266,6 +266,14 @@ class EVNSmartmeterSensor(SensorEntity):
 
     async def _async_run_import(self) -> bool:
         """Run one import. Caller must hold self._lock."""
+        # Consume the reimport request here, under the lock. Reading it later
+        # would let this run clear a request that arrived while it was in
+        # flight; restoring it below keeps a request that this run did not
+        # act on pending for the next one.
+        force_reimport = self.force_reimport
+        self.force_reimport = False
+        rebuilt = False
+
         api = Smartmeter(self.hass, self._username, self._password)
         try:
             await api.authenticate()
@@ -274,8 +282,6 @@ class EVNSmartmeterSensor(SensorEntity):
             # Determine fetch range (elvia pattern)
             statistic_id = self._statistic_id
             recorder = get_instance(self.hass)
-
-            force_reimport = self.force_reimport
 
             if force_reimport:
                 last_stats = None
@@ -354,10 +360,7 @@ class EVNSmartmeterSensor(SensorEntity):
                 await self.save_to_home_assistant(
                     all_day_data, last_stats, clear_existing=force_reimport
                 )
-                # The rebuild has been written; a pending reimport request is
-                # consumed here and not by merely finishing the run, so a run
-                # that fails earlier keeps it for the retry.
-                self.force_reimport = False
+                rebuilt = True
                 self._set_status("Imported")
                 _LOGGER.info(
                     "EVN import complete: %d days imported", len(all_day_data)
@@ -399,6 +402,10 @@ class EVNSmartmeterSensor(SensorEntity):
             self._set_status("Error")
             return True  # unknown — do not retry
         finally:
+            if force_reimport and not rebuilt:
+                # Nothing was written, so the request is still outstanding.
+                # A newer request may already have set the flag again.
+                self.force_reimport = True
             await api.close()
 
     async def _get_sum_before(self, statistic_id: str, before: datetime) -> float:
