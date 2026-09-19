@@ -57,7 +57,7 @@ class Smartmeter:
                 response = await self._session.get(self.API_USER_DETAILS_URL)
                 if response.status_code == 200:
                     return True
-            except (httpx.RequestError, TypeError):
+            except httpx.RequestError:
                 pass
             await self._session.aclose()
             self._session = None
@@ -152,13 +152,6 @@ class Smartmeter:
             )
         raise SmartmeterConnectionError("API request failed after re-authentication")
 
-    async def get_user_details(self) -> dict[str, Any]:
-        """Load user details."""
-        response = await self._call_api(
-            self.API_USER_DETAILS_URL, params={"context": "2"}
-        )
-        return response.json()[0]
-
     async def get_meter_details(self) -> list[dict[str, Any]]:
         """Load all metering points for the user.
 
@@ -242,31 +235,3 @@ class Smartmeter:
             sum(non_null) if non_null else 0.0,
         )
         return values
-
-    async def get_consumption_for_month(
-        self, year: int, month: int
-    ) -> list[tuple[str, float | None]]:
-        """Load consumption for one month (daily values).
-
-        Returns:
-            List of (timestamp, consumption_kwh) tuples.
-        """
-        _LOGGER.debug("Loading consumption for month %s/%s", month, year)
-        if self._metering_point_id is None:
-            await self.get_meter_details()
-        try:
-            response = await self._call_api(
-                self.API_CONSUMPTION_URL + "/Month",
-                params={
-                    "meterId": self._metering_point_id,
-                    "year": year,
-                    "month": month,
-                },
-            )
-            data = response.json()[0]
-            return list(zip(data["peakDemandTimes"], data["meteredValues"]))
-        except (httpx.RequestError, ValueError, KeyError, IndexError) as err:
-            _LOGGER.warning(
-                "Error fetching month consumption for %s/%s: %s", month, year, err
-            )
-            return []
