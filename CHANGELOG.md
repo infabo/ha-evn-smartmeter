@@ -5,7 +5,7 @@ Alle nennenswerten Änderungen an dieser Integration werden hier dokumentiert.
 Das Format orientiert sich an [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
-## [1.1.0] – 2026-09-19
+## [1.1.0] – 2026-09-20
 
 Sammelrelease aus einem vollständigen Code-Review der Codebasis. 23 Befunde wurden
 behoben, darunter mehrere, die gespeicherte Energiedaten verfälschen konnten.
