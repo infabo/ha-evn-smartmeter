@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -16,6 +17,7 @@ from homeassistant.helpers.selector import (
     NumberSelectorMode,
 )
 
+from . import statistic_id_for_username
 from .smartmeter import Smartmeter
 from .errors import SmartmeterLoginError, SmartmeterConnectionError
 
@@ -23,8 +25,10 @@ from .const import (
     DOMAIN,
     CONF_FETCH_HOUR_START,
     CONF_FETCH_HOUR_END,
+    CONF_STATISTIC_ID,
     DEFAULT_FETCH_HOUR_START,
     DEFAULT_FETCH_HOUR_END,
+    LEGACY_STATISTIC_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,6 +40,8 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
+STEP_REAUTH_DATA_SCHEMA = vol.Schema({vol.Required(CONF_PASSWORD): str})
+
 _HOUR_SELECTOR = NumberSelector(
     NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.SLIDER)
 )
@@ -44,7 +50,7 @@ _HOUR_SELECTOR = NumberSelector(
 class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for EVN Smart Meter."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback
@@ -68,9 +74,19 @@ class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
             # Validate credentials
             error = await self._test_credentials(username, password)
             if error is None:
+                # The first account keeps the legacy statistic id so existing
+                # Energy Dashboard setups keep working; further accounts get
+                # their own id derived from the username.
+                taken = {
+                    e.data.get(CONF_STATISTIC_ID)
+                    for e in self._async_current_entries()
+                }
+                statistic_id = LEGACY_STATISTIC_ID
+                if statistic_id in taken:
+                    statistic_id = statistic_id_for_username(username)
                 return self.async_create_entry(
                     title=f"EVN Smart Meter ({username})",
-                    data=user_input,
+                    data={**user_input, CONF_STATISTIC_ID: statistic_id},
                 )
             errors["base"] = error
 
@@ -80,11 +96,41 @@ class EVNSmartmeterConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle re-authentication after the portal rejected the credentials."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for a new password for the existing account."""
+        errors: dict[str, str] = {}
+        reauth_entry = self._get_reauth_entry()
+        username = reauth_entry.data[CONF_USERNAME]
+
+        if user_input is not None:
+            password = user_input[CONF_PASSWORD]
+            error = await self._test_credentials(username, password)
+            if error is None:
+                return self.async_update_reload_and_abort(
+                    reauth_entry, data_updates={CONF_PASSWORD: password}
+                )
+            errors["base"] = error
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=STEP_REAUTH_DATA_SCHEMA,
+            description_placeholders={"username": username},
+            errors=errors,
+        )
+
     async def _test_credentials(
         self, username: str, password: str
     ) -> str | None:
         """Validate credentials. Returns error key or None on success."""
-        api = Smartmeter(username, password)
+        api = Smartmeter(self.hass, username, password)
 
         try:
             await api.authenticate()
